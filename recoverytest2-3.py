@@ -1,3 +1,4 @@
+# --- Imports ---
 import os
 import msvcrt
 import win32file, win32con, win32api
@@ -6,7 +7,7 @@ import io
 import tempfile
 import subprocess
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta # Thêm timedelta
 import json
 import time
 import re
@@ -22,8 +23,18 @@ except ImportError:
     PYPDF2_AVAILABLE = False
     print("PyPDF2 library not found. PDF metadata extraction will be basic. Install with: pip install PyPDF2")
 
+# *** THÊM IMPORT EBMLITE ***
+try:
+    import ebmlite # Thư viện để đọc cấu trúc MKV
+    EBMLITE_AVAILABLE = True
+    print("ebmlite library found. Will use for detailed MKV metadata.")
+except ImportError:
+    EBMLITE_AVAILABLE = False
+    print("ebmlite library not found. MKV metadata extraction will be basic. Install with: pip install ebmlite")
+# *** KẾT THÚC IMPORT EBMLITE ***
 
-# Define file signatures and footers for each file type with metadata support
+
+# --- Các định nghĩa khác (FILE_SIGNATURES, parse_exif_date, extract_image_metadata, parse_pdf_date, extract_pdf_metadata giữ nguyên) ---
 FILE_SIGNATURES = {
     "JPEG": {
         "headers": [b'\xff\xd8\xff\xe0', b'\xff\xd8\xff\xe1', b'\xff\xd8\xff\xe2'],
@@ -38,86 +49,81 @@ FILE_SIGNATURES = {
         "metadata_func": lambda data: extract_pdf_metadata(data)
     },
     "MKV": {
-        "headers": [b'\x1A\x45\xDF\xA3'],
+        "headers": [b'\x1A\x45\xDF\xA3'], # EBML Header
         "footer": None,
         "extension": ".mkv",
-        "metadata_func": lambda data: extract_mkv_metadata(data)
+        "metadata_func": lambda data: extract_mkv_metadata(data) # Sẽ gọi hàm mới
     }
 }
 
 def parse_exif_date(date_str):
     if not date_str or not isinstance(date_str, str): return None
     try:
-        dt = datetime.strptime(date_str.strip(), '%Y:%m:%d %H:%M:%S')
-        return dt.isoformat()
-    except ValueError: return str(date_str)
+        date_str_cleaned = date_str.strip().split('.')[0]
+        for fmt in ('%Y:%m:%d %H:%M:%S', '%Y-%m-%d %H:%M:%S'):
+             try:
+                 dt = datetime.strptime(date_str_cleaned, fmt)
+                 return dt.isoformat()
+             except ValueError: continue
+        return str(date_str)
+    except Exception: return str(date_str)
 
-# --- Metadata extraction functions (Cập nhật JPEG và MKV) ---
 def extract_image_metadata(data):
+    print("\n--- Extracting JPEG Metadata ---")
+    metadata = {"format": None, "size_pixels": None, "mode": None, "embedded_title": None,
+                "embedded_creation_date": None, "embedded_modified_date": None, "extraction_notes": [], "exif_all": None}
     try:
-        image = Image.open(io.BytesIO(data))
-        metadata = {
-            "format": image.format, "size_pixels": f"{image.width}x{image.height}",
-            "mode": image.mode, "embedded_title": None,
-            "embedded_creation_date": None, "embedded_modified_date": None,
-            "extraction_notes": []
-        }
+        image = Image.open(io.BytesIO(data)); metadata["format"] = image.format
+        metadata["size_pixels"] = f"{image.width}x{image.height}"; metadata["mode"] = image.mode
+        print(f"  Basic info: Format={image.format}, Size={image.size}, Mode={image.mode}")
         try:
             exif_data = image._getexif()
             if exif_data:
-                exif = {}
-                tag_found_notes = {"DateTimeOriginal": False, "DateTimeDigitized": False, "DateTime": False, "ImageDescription": False, "XPTitle": False}
+                print("  EXIF data found. Processing tags..."); metadata["extraction_notes"].append("EXIF data found.")
+                exif = {}; tag_values = {}
                 for k, v in exif_data.items():
                     if k in ExifTags.TAGS:
-                        tag_name = ExifTags.TAGS[k]
+                        tag_name = ExifTags.TAGS[k]; tag_values[tag_name] = v; processed_v = v
                         if isinstance(v, bytes):
-                            try: exif[tag_name] = v.decode('utf-8', errors='replace').strip()
-                            except: exif[tag_name] = str(v) # Fallback
-                        else: exif[tag_name] = v if not isinstance(v, str) else v.strip()
-                        if tag_name in tag_found_notes: tag_found_notes[tag_name] = True
-
+                            try: processed_v = v.decode('utf-8', errors='replace').strip()
+                            except: processed_v = str(v)
+                        elif isinstance(v, str): processed_v = v.strip()
+                        exif[tag_name] = processed_v
                 metadata["exif_all"] = {key: str(value)[:200] for key, value in exif.items()}
-
-                # Ưu tiên DateTimeOriginal cho ngày tạo
-                metadata["embedded_creation_date"] = parse_exif_date(exif.get("DateTimeOriginal"))
-                if not metadata["embedded_creation_date"] and tag_found_notes["DateTimeDigitized"]:
-                     metadata["embedded_creation_date"] = parse_exif_date(exif.get("DateTimeDigitized")) # Dùng tạm nếu Original không có
-
-                # Lấy DateTime cho ngày sửa đổi
-                metadata["embedded_modified_date"] = parse_exif_date(exif.get("DateTime"))
-
-                # Lấy tiêu đề
-                title_cand = exif.get("ImageDescription")
-                xp_title_cand_bytes = exif_data.get(0x9c9b) # Tag ID for XPTitle (bytes)
-
-                if title_cand:
-                    metadata["embedded_title"] = title_cand
-                    if not tag_found_notes["ImageDescription"]: metadata["extraction_notes"].append("Used ImageDescription tag.")
-                elif xp_title_cand_bytes:
-                    decoded_xp_title = None
-                    try: decoded_xp_title = xp_title_cand_bytes.decode('utf-16-le', errors='replace').strip()
-                    except:
-                        try: decoded_xp_title = xp_title_cand_bytes.decode('latin-1', errors='replace').strip()
-                        except: pass # Ignore if all decodings fail
-                    if decoded_xp_title:
-                        metadata["embedded_title"] = decoded_xp_title
-                        if not tag_found_notes["XPTitle"]: metadata["extraction_notes"].append("Used XPTitle tag (decoded).")
-
-                # Ghi chú nếu không tìm thấy các thẻ quan trọng
-                if not tag_found_notes["DateTimeOriginal"] and not tag_found_notes["DateTimeDigitized"]: metadata["extraction_notes"].append("Creation date tag (DateTimeOriginal/Digitized) not found in EXIF.")
-                if not tag_found_notes["DateTime"]: metadata["extraction_notes"].append("Modification date tag (DateTime) not found in EXIF.")
-                if not metadata["embedded_title"]: metadata["extraction_notes"].append("Title tag (ImageDescription/XPTitle) not found or empty in EXIF.")
-
-            else:
-                 metadata["extraction_notes"].append("No EXIF data found in the image.")
-
+                dt_orig = exif.get("DateTimeOriginal"); dt_digi = exif.get("DateTimeDigitized"); dt_mod = exif.get("DateTime")
+                img_desc = exif.get("ImageDescription"); xp_title_bytes = exif_data.get(0x9c9b)
+                print(f"  EXIF DateTimeOriginal: {dt_orig} (Type: {type(dt_orig).__name__})")
+                print(f"  EXIF DateTimeDigitized: {dt_digi} (Type: {type(dt_digi).__name__})")
+                print(f"  EXIF DateTime: {dt_mod} (Type: {type(dt_mod).__name__})")
+                print(f"  EXIF ImageDescription: {img_desc} (Type: {type(img_desc).__name__})")
+                print(f"  EXIF XPTitle (raw bytes tag 0x9c9b): {'Present' if xp_title_bytes else 'Not Present'}")
+                metadata["embedded_creation_date"] = parse_exif_date(dt_orig)
+                if not metadata["embedded_creation_date"]:
+                     metadata["embedded_creation_date"] = parse_exif_date(dt_digi)
+                     if metadata["embedded_creation_date"]: metadata["extraction_notes"].append("Used DateTimeDigitized for creation date.")
+                metadata["embedded_modified_date"] = parse_exif_date(dt_mod)
+                if not metadata["embedded_modified_date"]:
+                    metadata["embedded_modified_date"] = parse_exif_date(dt_digi)
+                    if metadata["embedded_modified_date"]: metadata["extraction_notes"].append("Used DateTimeDigitized for modified date (DateTime missing).")
+                if img_desc: metadata["embedded_title"] = img_desc; metadata["extraction_notes"].append("Used ImageDescription for title.")
+                elif xp_title_bytes:
+                    decoded_xp_title = None; print(f"  Attempting XPTitle decode (len: {len(xp_title_bytes)})...")
+                    try: decoded_xp_title = xp_title_bytes.decode('utf-16-le', errors='replace').strip(); print(f"    Decoded XPTitle (UTF-16LE): '{decoded_xp_title}'")
+                    except Exception as e1:
+                        print(f"    UTF-16LE decode failed: {e1}")
+                        try: decoded_xp_title = xp_title_bytes.decode('latin-1', errors='replace').strip(); print(f"    Decoded XPTitle (Latin-1): '{decoded_xp_title}'")
+                        except Exception as e2: print(f"    Latin-1 decode failed: {e2}"); decoded_xp_title = str(xp_title_bytes); print(f"    XPTitle fallback to string: '{decoded_xp_title}'")
+                    if decoded_xp_title: metadata["embedded_title"] = decoded_xp_title; metadata["extraction_notes"].append("Used XPTitle tag (decoded) for title.")
+                if not metadata["embedded_creation_date"]: metadata["extraction_notes"].append("Could not determine creation date from EXIF.")
+                if not metadata["embedded_modified_date"]: metadata["extraction_notes"].append("Could not determine modification date from EXIF.")
+                if not metadata["embedded_title"]: metadata["extraction_notes"].append("Could not determine embedded title from EXIF.")
+            else: print("  No EXIF data found in the image."); metadata["extraction_notes"].append("No EXIF data found.")
         except Exception as exif_e:
-            metadata["exif_error"] = str(exif_e)
-            metadata["extraction_notes"].append(f"Error during EXIF processing: {exif_e}")
-
+            metadata["exif_error"] = str(exif_e); metadata["extraction_notes"].append(f"Error during EXIF processing: {exif_e}")
+            print(f"  Error processing EXIF: {exif_e}")
+        print("--- Finished JPEG Metadata Extraction ---")
         return metadata
-    except Exception as e:
-        return {"error": str(e), "notes": ["Could not open image or read basic properties."]}
+    except Exception as e: print(f"--- Error Opening/Processing JPEG: {e} ---"); return {"error": str(e), "notes": ["Could not open image or read basic properties."]}
 
 def parse_pdf_date(date_str): # Giữ nguyên
     if not date_str or not isinstance(date_str, str): return None
@@ -166,37 +172,137 @@ def extract_pdf_metadata(data): # Giữ nguyên
         metadata["error"] = f"PyPDF2 processing error: {str(e)}"; metadata["extraction_notes"].append(f"PyPDF2 error: {e}")
         return metadata
 
-def extract_mkv_metadata(data): # Cập nhật ghi chú
-    try:
-        metadata = {
-            "size_bytes": len(data),
-            "file_type_suggestion": "MKV (Matroska Video)",
-            "note": "MKV metadata (title, dates) often requires external tools (mkvinfo/ffmpeg). Basic text search for title is unreliable.", # Ghi chú rõ hơn
-            "embedded_title": None,
-            "embedded_creation_date": None, # Không cố gắng lấy ngày tháng cho MKV bằng cách này
-            "extraction_notes": ["MKV date extraction not attempted due to complexity."]
-        }
-        # Cải thiện tìm kiếm title một chút (vẫn không đảm bảo)
+# --- HÀM MỚI CHO MKV SỬ DỤNG EBMLITE ---
+def extract_mkv_metadata(data):
+    metadata = {
+        "size_bytes": len(data),
+        "file_type_suggestion": "MKV (Matroska Video)",
+        "embedded_title": None,
+        "embedded_creation_date": None, # Hoặc coi là Muxing Date
+        "extraction_notes": []
+    }
+
+    if not EBMLITE_AVAILABLE:
+        metadata["error"] = "ebmlite library not installed."
+        metadata["extraction_notes"].append("Cannot perform detailed MKV parsing.")
+        # Có thể giữ lại phần tìm kiếm text cũ làm fallback nếu muốn
         try:
             text_data = data.decode('latin-1', errors='ignore')
-            # Tìm tag TITLE hoặc Segment Title (thường gần đầu file hoặc trong Segment Info)
-            title_match = re.search(r"(?:TITLE|Segment title)(?:\s*:\s*|\x00{1,3})([^\x00-\x1F\x7F-\xFF]{3,150})", text_data[:20000], re.IGNORECASE) # Tìm trong 20KB đầu
+            title_match = re.search(r"(?:TITLE|Segment title)(?:\s*:\s*|\x00{1,3})([^\x00-\x1F\x7F-\xFF]{3,150})", text_data[:20000], re.IGNORECASE)
             if title_match:
                 potential_title = title_match.group(1).strip()
-                # Lọc bỏ các chuỗi trông giống ngày tháng hoặc thông tin kỹ thuật
                 if not re.match(r"^\d{4}-\d{2}-\d{2}|\d+x\d+|Lavf", potential_title):
                     metadata["embedded_title"] = potential_title
-                    metadata["extraction_notes"].append(f"Potential title found via text search: '{potential_title[:30]}...'")
-            else:
-                 metadata["extraction_notes"].append("No obvious title found via basic text search in MKV.")
-        except Exception as mkv_e:
-             metadata["extraction_notes"].append(f"Error during basic MKV text search: {mkv_e}")
+                    metadata["extraction_notes"].append(f"(Fallback) Potential title found via text search: '{potential_title[:30]}...'")
+        except: pass # Bỏ qua lỗi trong fallback
         return metadata
+
+    # Sử dụng ebmlite
+    stream = io.BytesIO(data)
+    try:
+        print("--- Parsing MKV with ebmlite ---")
+        metadata["extraction_notes"].append("Attempting MKV parse with ebmlite.")
+        # ebmlite cần biết schema của Matroska để hiểu các ID
+        # Tải schema mặc định đi kèm ebmlite (cần đảm bảo ebmlite cài đúng cách)
+        schema_path = os.path.join(os.path.dirname(ebmlite.__file__), 'schemata', 'matroska.xml')
+        if not os.path.exists(schema_path):
+             print(f"  Matroska schema not found at {schema_path}. ebmlite parsing might be limited.")
+             metadata["extraction_notes"].append("Matroska schema for ebmlite not found. Parsing might fail.")
+             # Nếu không có schema, bạn vẫn có thể thử load nhưng sẽ không biết tên tag
+             # doc = ebmlite.Document.load(stream)
+             raise FileNotFoundError("Matroska schema for ebmlite not found.") # Hoặc dừng lại ở đây
+        else:
+            print(f"  Loading Matroska schema from: {schema_path}")
+            schema = ebmlite.loadSchema(schema_path) #'matroska.xml')
+            doc = schema.load(stream) # Load với schema
+
+        # Tìm các elements quan trọng
+        # Lưu ý: Cấu trúc tài liệu ebmlite có thể hơi khác nhau
+        segment = None
+        for element in doc:
+             # Element cấp cao nhất thường là EBML header và Segment
+             if element.name == 'Segment': # Tìm theo tên nếu dùng schema
+                 segment = element
+                 print(f"  Found Segment element.")
+                 break
+             elif element.id == 0x18538067: # Tìm theo ID nếu không dùng schema (dự phòng)
+                 segment = element
+                 print(f"  Found Segment element (by ID).")
+                 break
+
+        if segment:
+            info_element = None
+            for element in segment: # Duyệt các element con của Segment
+                if element.name == 'Info': # Tìm Info element
+                    info_element = element
+                    print(f"  Found Info element.")
+                    break
+                elif element.id == 0x1549A966: # ID của Info (dự phòng)
+                     info_element = element
+                     print(f"  Found Info element (by ID).")
+                     break
+
+            if info_element:
+                 title_val = None
+                 date_utc_val = None
+                 for element in info_element: # Duyệt các element con của Info
+                     if element.name == 'Title': # ID 0x7BA9
+                         title_val = element.value
+                         print(f"  Found Title element: {title_val} (Type: {type(title_val).__name__})")
+                     elif element.name == 'DateUTC': # ID 0x4461
+                         date_utc_val = element.value
+                         print(f"  Found DateUTC element: {date_utc_val} (Type: {type(date_utc_val).__name__})")
+
+                 # Xử lý Title
+                 if title_val:
+                     if isinstance(title_val, bytes):
+                         try: metadata["embedded_title"] = title_val.decode('utf-8').strip()
+                         except: metadata["embedded_title"] = str(title_val)
+                     else: metadata["embedded_title"] = str(title_val).strip()
+                     metadata["extraction_notes"].append(f"Extracted Title: '{metadata['embedded_title'][:50]}...'")
+
+                 # Xử lý DateUTC
+                 if date_utc_val is not None: # DateUTC có thể là 0
+                     if isinstance(date_utc_val, int):
+                         try:
+                             # DateUTC là nanoseconds kể từ 2001-01-01 00:00:00 UTC
+                             epoch_2001 = datetime(2001, 1, 1, 0, 0, 0)
+                             # Chuyển nanoseconds sang microseconds cho timedelta
+                             mkv_datetime = epoch_2001 + timedelta(microseconds=date_utc_val // 1000)
+                             metadata["embedded_creation_date"] = mkv_datetime.isoformat() + "Z" # Thêm Z cho UTC
+                             metadata["extraction_notes"].append(f"Extracted DateUTC: {metadata['embedded_creation_date']}")
+                         except Exception as date_e:
+                              print(f"  Error converting DateUTC value {date_utc_val}: {date_e}")
+                              metadata["extraction_notes"].append(f"Could not convert DateUTC value: {date_e}")
+                     else:
+                          print(f"  DateUTC value is not an integer ({type(date_utc_val).__name__}).")
+                          metadata["extraction_notes"].append("DateUTC value has unexpected type.")
+
+            else: print("  Info element not found within Segment."); metadata["extraction_notes"].append("Info element not found.")
+        else: print("  Segment element not found in MKV data."); metadata["extraction_notes"].append("Segment element not found.")
+
+    except ebmlite.core.DecodeError as e:
+        metadata["error"] = f"ebmlite DecodeError: {e}"
+        metadata["extraction_notes"].append(f"ebmlite decode error (file might be corrupt/incomplete): {e}")
+        print(f"--- ebmlite DecodeError: {e} ---")
+    except FileNotFoundError as e: # Bắt lỗi không tìm thấy schema
+        metadata["error"] = f"ebmlite schema error: {e}"
+        metadata["extraction_notes"].append(f"ebmlite schema error: {e}")
+        print(f"--- ebmlite Schema Error: {e} ---")
     except Exception as e:
-        return {"error": str(e), "extraction_notes": [f"General error processing MKV: {e}"]}
+        metadata["error"] = f"General ebmlite processing error: {e}"
+        metadata["extraction_notes"].append(f"General ebmlite error: {e}")
+        print(f"--- General ebmlite Error: {e} ---")
+    finally:
+         # Đảm bảo stream được đóng nếu cần (BytesIO thì không cần thiết lắm)
+         # if stream: stream.close()
+         print("--- Finished MKV Metadata Extraction ---")
+
+    return metadata
+# --- KẾT THÚC HÀM MKV MỚI ---
 
 
-# --- Các hàm và phần còn lại của code (không thay đổi) ---
+# ... (Phần còn lại của mã từ calculate_hash đến root.mainloop() giữ nguyên) ...
 def calculate_hash(data): return hashlib.sha256(data).hexdigest()
 def get_available_drives():
     drives = []; drive_bits = win32api.GetLogicalDrives()
@@ -214,7 +320,6 @@ def open_raw_drive(drive_path):
     except Exception as e: win32api.CloseHandle(handle); raise Exception(f"Failed to convert handle to file: {e}")
     return fileD
 
-# ... (scan_drive_internal giữ nguyên như phiên bản trước) ...
 def scan_drive_internal(raw_drive_path, total_size, selected_types, progress_callback,
                         stop_event, listbox_update_callback, scan_mode="normal", sector_size=512):
     recovered_files_list_temp = []
@@ -324,7 +429,6 @@ def scan_drive_internal(raw_drive_path, total_size, selected_types, progress_cal
     if progress_callback: progress_callback(1.0, True if not stop_event.is_set() else False)
     return recovered_files_list_temp
 
-# ... (Các hàm xem trước: close_current_preview, _close_if_exists, show_metadata, preview_image, preview_text_internal, preview_external_file, preview_mkv, preview_pdf_external giữ nguyên) ...
 current_preview_window = None
 stop_scan_event = threading.Event()
 
@@ -439,31 +543,22 @@ def preview_external_file(data, metadata, file_extension, file_type_name):
 def preview_mkv(data, metadata=None): preview_external_file(data, metadata, ".mkv", "MKV")
 def preview_pdf_external(data, metadata=None): preview_external_file(data, metadata, ".pdf", "PDF")
 
-# ... (Phần cài đặt GUI: root, main_frame, tab_view, các hàm create_scan_ui, common_controls_frame với các nút lớn hơn, get_active_tab_ui_elements, update_listbox_threaded, start_scan_wrapper, on_item_double_click, context_menu, show_selected_metadata_from_active_tab, show_context_menu, recover_selected_files_from_active_tab, save_scan_report_from_active_tab, on_closing giữ nguyên như phiên bản trước đó đã sửa lỗi hiển thị nút) ...
 ctk.set_appearance_mode("System"); ctk.set_default_color_theme("blue")
 root = ctk.CTk(); root.title("Enhanced File Recovery Tool"); root.geometry("1100x850")
 recovered_files_data_store = {}; recovered_files_display_list = []
 output_dir = ""; current_scan_thread = None
 main_frame = ctk.CTkFrame(root); main_frame.pack(padx=10, pady=10, fill="both", expand=True)
 
-# --- SỬA THỨ TỰ PACK: PACK COMMON CONTROLS TRƯỚC ---
-common_controls_frame = ctk.CTkFrame(main_frame) # Cha là main_frame
-common_controls_frame.pack(pady=10, fill="x", padx=15, side="bottom") # Đặt ở dưới cùng
-
+common_controls_frame = ctk.CTkFrame(main_frame)
+common_controls_frame.pack(pady=10, fill="x", padx=15, side="bottom")
 button_font = ("Segoe UI", 14)
-recover_button = ctk.CTkButton(common_controls_frame, text="Recover Selected Files",
-    command=lambda: recover_selected_files_from_active_tab(), height=40, width=220, font=button_font)
+recover_button = ctk.CTkButton(common_controls_frame, text="Recover Selected Files", command=lambda: recover_selected_files_from_active_tab(), height=40, width=220, font=button_font)
 recover_button.pack(side="left", padx=10, pady=10)
-report_button = ctk.CTkButton(common_controls_frame, text="Save Scan Report",
-    command=lambda: save_scan_report_from_active_tab(), height=40, width=200, font=button_font)
+report_button = ctk.CTkButton(common_controls_frame, text="Save Scan Report", command=lambda: save_scan_report_from_active_tab(), height=40, width=200, font=button_font)
 report_button.pack(side="left", padx=10, pady=10)
-# --- KẾT THÚC COMMON CONTROLS ---
 
-
-# --- PACK TAB VIEW SAU KHI COMMON CONTROLS ĐÃ Ở DƯỚI ---
-tab_view = ctk.CTkTabview(main_frame) # Cha là main_frame
-tab_view.pack(padx=5, pady=5, fill="both", expand=True) # Mặc định side="top", chiếm phần còn lại
-
+tab_view = ctk.CTkTabview(main_frame)
+tab_view.pack(padx=5, pady=5, fill="both", expand=True)
 normal_scan_tab = tab_view.add("Normal Scan")
 deep_scan_tab = tab_view.add("Deep Scan (Sector by Sector)")
 
@@ -541,8 +636,13 @@ def update_listbox_threaded(ui_elems, file_info_for_display):
     if ui_elems and ui_elems.get("listbox"):
         listbox = ui_elems["listbox"]; recovered_files_display_list.append(file_info_for_display)
         display_str = f"{file_info_for_display['display_name']} ({file_info_for_display['size']/(1024*1024):.2f} MB)"
-        if file_info_for_display.get("embedded_creation_date"): display_str += f" [C: {file_info_for_display['embedded_creation_date'][:10]}]"
-        elif file_info_for_display.get("embedded_modified_date"): display_str += f" [M: {file_info_for_display['embedded_modified_date'][:10]}]"
+        # Hiển thị ngày tạo nếu có, nếu không thì hiển thị ngày sửa đổi
+        date_str = ""
+        if file_info_for_display.get("embedded_creation_date"):
+             date_str = f" [C: {file_info_for_display['embedded_creation_date'][:10]}]" # Lấy phần YYYY-MM-DD
+        elif file_info_for_display.get("embedded_modified_date"):
+             date_str = f" [M: {file_info_for_display['embedded_modified_date'][:10]}]" # Lấy phần YYYY-MM-DD
+        display_str += date_str
         display_str += f" - Off: {file_info_for_display['offset']:x}"
         listbox.insert(tk.END, display_str); listbox.see(tk.END)
         ui_elems["progress_label"].configure(text=f"Status: Scanning... Found {len(recovered_files_display_list)} files.")
@@ -627,14 +727,12 @@ def show_context_menu(event):
     if not active_ui: return
     listbox = active_ui["listbox"]
     try:
-        # Ensure an item is selected before showing the menu
         current_selection = listbox.curselection()
-        if not current_selection: # If nothing selected, try selecting item under cursor
+        if not current_selection:
             listbox.selection_clear(0, tk.END)
             nearest_item_index = listbox.nearest(event.y)
             listbox.selection_set(nearest_item_index)
-            # listbox.activate(nearest_item_index) # activate might not be needed
-        if listbox.curselection(): # Check selection again after potential nearest selection
+        if listbox.curselection():
              context_menu.tk_popup(event.x_root, event.y_root)
     finally: context_menu.grab_release()
 normal_scan_ui["listbox"].bind("<Button-3>", show_context_menu)
@@ -687,7 +785,8 @@ def save_scan_report_from_active_tab():
         try:
             drive_scanned = active_ui["drive_var"].get()
             scanned_types_keys = [ftype for ftype, var in active_ui["selected_types_vars"].items() if var.get() == 1]
-            report_data = {"scan_report_version": "1.2", "scan_timestamp": datetime.now().isoformat(),
+            report_data = {"scan_report_version": "1.3", # Bump version for ebmlite change
+                           "scan_timestamp": datetime.now().isoformat(),
                            "scanned_drive": drive_scanned, "selected_file_types_for_scan": scanned_types_keys,
                            "total_files_found_in_session": len(recovered_files_display_list),
                            "recovered_files_summary": [
@@ -695,7 +794,7 @@ def save_scan_report_from_active_tab():
                                 "type": f["type"], "size_bytes": f["size"], "sha256_hash": f["data_hash"],
                                 "found_at_offset_hex": f"{f['offset']:x}", "discovery_timestamp": f["discovery_time"],
                                 "embedded_title": f.get("embedded_title"),
-                                "embedded_creation_date": f.get("embedded_creation_date"),
+                                "embedded_creation_date": f.get("embedded_creation_date"), # Date from MKV is likely creation/muxing
                                 "embedded_modified_date": f.get("embedded_modified_date"),
                                 "detailed_metadata_preview": {k: str(v)[:200] for k, v in f.get("other_metadata", {}).items() if not isinstance(v, (Image.Image, bytes))}
                                } for f in recovered_files_display_list]}
