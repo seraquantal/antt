@@ -46,163 +46,175 @@ FILE_SIGNATURES = {
 }
 
 def parse_exif_date(date_str):
-    if not date_str or not isinstance(date_str, str):
-        return None
+    if not date_str or not isinstance(date_str, str): return None
     try:
-        dt = datetime.strptime(date_str, '%Y:%m:%d %H:%M:%S')
+        dt = datetime.strptime(date_str.strip(), '%Y:%m:%d %H:%M:%S')
         return dt.isoformat()
-    except ValueError:
-        return str(date_str)
+    except ValueError: return str(date_str)
 
+# --- Metadata extraction functions (Cập nhật JPEG và MKV) ---
 def extract_image_metadata(data):
     try:
         image = Image.open(io.BytesIO(data))
         metadata = {
-            "format": image.format,
-            "size_pixels": f"{image.width}x{image.height}",
-            "mode": image.mode,
-            "embedded_title": None,
-            "embedded_creation_date": None,
-            "embedded_modified_date": None,
+            "format": image.format, "size_pixels": f"{image.width}x{image.height}",
+            "mode": image.mode, "embedded_title": None,
+            "embedded_creation_date": None, "embedded_modified_date": None,
+            "extraction_notes": []
         }
         try:
             exif_data = image._getexif()
             if exif_data:
                 exif = {}
+                tag_found_notes = {"DateTimeOriginal": False, "DateTimeDigitized": False, "DateTime": False, "ImageDescription": False, "XPTitle": False}
                 for k, v in exif_data.items():
                     if k in ExifTags.TAGS:
                         tag_name = ExifTags.TAGS[k]
                         if isinstance(v, bytes):
-                            try:
-                                exif[tag_name] = v.decode('utf-8', errors='replace').strip()
-                            except:
-                                exif[tag_name] = str(v)
-                        else:
-                             exif[tag_name] = v if not isinstance(v, str) else v.strip()
+                            try: exif[tag_name] = v.decode('utf-8', errors='replace').strip()
+                            except: exif[tag_name] = str(v) # Fallback
+                        else: exif[tag_name] = v if not isinstance(v, str) else v.strip()
+                        if tag_name in tag_found_notes: tag_found_notes[tag_name] = True
+
                 metadata["exif_all"] = {key: str(value)[:200] for key, value in exif.items()}
-                metadata["embedded_creation_date"] = parse_exif_date(exif.get("DateTimeOriginal")) or \
-                                                  parse_exif_date(exif.get("DateTimeDigitized"))
+
+                # Ưu tiên DateTimeOriginal cho ngày tạo
+                metadata["embedded_creation_date"] = parse_exif_date(exif.get("DateTimeOriginal"))
+                if not metadata["embedded_creation_date"] and tag_found_notes["DateTimeDigitized"]:
+                     metadata["embedded_creation_date"] = parse_exif_date(exif.get("DateTimeDigitized")) # Dùng tạm nếu Original không có
+
+                # Lấy DateTime cho ngày sửa đổi
                 metadata["embedded_modified_date"] = parse_exif_date(exif.get("DateTime"))
-                metadata["embedded_title"] = exif.get("ImageDescription") or exif.get("XPTitle")
-                if metadata["embedded_title"] and isinstance(metadata["embedded_title"], bytes):
-                     try:
-                         metadata["embedded_title"] = metadata["embedded_title"].decode('utf-16-le', errors='replace').strip()
-                     except UnicodeDecodeError:
-                         metadata["embedded_title"] = metadata["embedded_title"].decode('latin-1', errors='replace').strip()
+
+                # Lấy tiêu đề
+                title_cand = exif.get("ImageDescription")
+                xp_title_cand_bytes = exif_data.get(0x9c9b) # Tag ID for XPTitle (bytes)
+
+                if title_cand:
+                    metadata["embedded_title"] = title_cand
+                    if not tag_found_notes["ImageDescription"]: metadata["extraction_notes"].append("Used ImageDescription tag.")
+                elif xp_title_cand_bytes:
+                    decoded_xp_title = None
+                    try: decoded_xp_title = xp_title_cand_bytes.decode('utf-16-le', errors='replace').strip()
+                    except:
+                        try: decoded_xp_title = xp_title_cand_bytes.decode('latin-1', errors='replace').strip()
+                        except: pass # Ignore if all decodings fail
+                    if decoded_xp_title:
+                        metadata["embedded_title"] = decoded_xp_title
+                        if not tag_found_notes["XPTitle"]: metadata["extraction_notes"].append("Used XPTitle tag (decoded).")
+
+                # Ghi chú nếu không tìm thấy các thẻ quan trọng
+                if not tag_found_notes["DateTimeOriginal"] and not tag_found_notes["DateTimeDigitized"]: metadata["extraction_notes"].append("Creation date tag (DateTimeOriginal/Digitized) not found in EXIF.")
+                if not tag_found_notes["DateTime"]: metadata["extraction_notes"].append("Modification date tag (DateTime) not found in EXIF.")
+                if not metadata["embedded_title"]: metadata["extraction_notes"].append("Title tag (ImageDescription/XPTitle) not found or empty in EXIF.")
+
+            else:
+                 metadata["extraction_notes"].append("No EXIF data found in the image.")
+
         except Exception as exif_e:
             metadata["exif_error"] = str(exif_e)
+            metadata["extraction_notes"].append(f"Error during EXIF processing: {exif_e}")
+
         return metadata
     except Exception as e:
-        return {"error": str(e), "notes": "Could not open image or read basic properties."}
+        return {"error": str(e), "notes": ["Could not open image or read basic properties."]}
 
-def parse_pdf_date(date_str):
-    if not date_str or not isinstance(date_str, str):
-        return None
-    date_str = date_str.strip()
-    if date_str.startswith("D:"):
-        date_str = date_str[2:]
+def parse_pdf_date(date_str): # Giữ nguyên
+    if not date_str or not isinstance(date_str, str): return None
+    date_str = date_str.strip();
+    if date_str.startswith("D:"): date_str = date_str[2:]
     if 'Z' in date_str or '+' in date_str or '-' in date_str:
-        match = re.match(r"(\d{14})", date_str)
-        if match:
-            date_str = match.group(1)
-        else:
-            return str(date_str)
-    elif len(date_str) > 14:
-        date_str = date_str[:14]
+        match = re.match(r"(\d{14})", date_str); date_str = match.group(1) if match else str(date_str)
+    elif len(date_str) > 14: date_str = date_str[:14]
     try:
         if len(date_str) >= 14: dt = datetime.strptime(date_str[:14], '%Y%m%d%H%M%S')
         elif len(date_str) >= 12: dt = datetime.strptime(date_str[:12], '%Y%m%d%H%M')
         elif len(date_str) >= 8: dt = datetime.strptime(date_str[:8], '%Y%m%d')
         else: return str(date_str)
         return dt.isoformat()
-    except ValueError:
-        return str(date_str)
+    except ValueError: return str(date_str)
 
-def extract_pdf_metadata(data):
-    metadata = {
-        "embedded_title": None, "embedded_author": None,
-        "embedded_creation_date": None, "embedded_modified_date": None,
-        "pdf_version": None, "num_pages": None,
-    }
+def extract_pdf_metadata(data): # Giữ nguyên
+    metadata = {"embedded_title": None, "embedded_author": None, "embedded_creation_date": None,
+                "embedded_modified_date": None, "pdf_version": None, "num_pages": None, "extraction_notes": []}
     if not PYPDF2_AVAILABLE:
         metadata["error"] = "PyPDF2 library not available for detailed PDF metadata."
+        metadata["extraction_notes"].append("Using basic text search for PDF metadata (less reliable).")
         try:
             text_content = data.decode('latin-1', errors='ignore')[:3000]
-            title_match = re.search(r"/Title\s*\((.*?)\)", text_content, re.IGNORECASE)
-            if title_match: metadata["embedded_title"] = title_match.group(1).strip()
-            author_match = re.search(r"/Author\s*\((.*?)\)", text_content, re.IGNORECASE)
-            if author_match: metadata["embedded_author"] = author_match.group(1).strip()
-            creation_match = re.search(r"/CreationDate\s*\((.*?)\)", text_content, re.IGNORECASE)
-            if creation_match: metadata["embedded_creation_date"] = parse_pdf_date(creation_match.group(1))
-            mod_match = re.search(r"/ModDate\s*\((.*?)\)", text_content, re.IGNORECASE)
-            if mod_match: metadata["embedded_modified_date"] = parse_pdf_date(mod_match.group(1))
-        except Exception as e_basic:
-            metadata["basic_extraction_error"] = str(e_basic)
+            title_match = re.search(r"/Title\s*\((.*?)\)", text_content, re.IGNORECASE); metadata["embedded_title"] = title_match.group(1).strip() if title_match else None
+            author_match = re.search(r"/Author\s*\((.*?)\)", text_content, re.IGNORECASE); metadata["embedded_author"] = author_match.group(1).strip() if author_match else None
+            creation_match = re.search(r"/CreationDate\s*\((.*?)\)", text_content, re.IGNORECASE); metadata["embedded_creation_date"] = parse_pdf_date(creation_match.group(1)) if creation_match else None
+            mod_match = re.search(r"/ModDate\s*\((.*?)\)", text_content, re.IGNORECASE); metadata["embedded_modified_date"] = parse_pdf_date(mod_match.group(1)) if mod_match else None
+        except Exception as e_basic: metadata["basic_extraction_error"] = str(e_basic); metadata["extraction_notes"].append(f"Error during basic search: {e_basic}")
         return metadata
     try:
-        pdf_file = io.BytesIO(data)
-        reader = PdfReader(pdf_file)
-        doc_info = reader.metadata
+        pdf_file = io.BytesIO(data); reader = PdfReader(pdf_file); doc_info = reader.metadata
+        metadata["extraction_notes"].append("Using PyPDF2 for metadata extraction.")
         if doc_info:
             metadata["embedded_title"] = doc_info.title if doc_info.title else None
             metadata["embedded_author"] = doc_info.author if doc_info.author else None
             if doc_info.creation_date: metadata["embedded_creation_date"] = doc_info.creation_date.isoformat()
             if doc_info.modification_date: metadata["embedded_modified_date"] = doc_info.modification_date.isoformat()
+        else: metadata["extraction_notes"].append("PyPDF2 found no standard metadata object.")
         try: metadata["num_pages"] = len(reader.pages)
         except: metadata["num_pages"] = "N/A"
-        header_str = data[:10].decode('latin-1', errors='ignore')
-        version_match = re.match(r"%PDF-(\d\.\d)", header_str)
+        header_str = data[:10].decode('latin-1', errors='ignore'); version_match = re.match(r"%PDF-(\d\.\d)", header_str)
         if version_match: metadata["pdf_version"] = version_match.group(1)
         return metadata
     except Exception as e:
-        metadata["error"] = f"PyPDF2 processing error: {str(e)}"
+        metadata["error"] = f"PyPDF2 processing error: {str(e)}"; metadata["extraction_notes"].append(f"PyPDF2 error: {e}")
         return metadata
 
-def extract_mkv_metadata(data):
+def extract_mkv_metadata(data): # Cập nhật ghi chú
     try:
         metadata = {
             "size_bytes": len(data),
             "file_type_suggestion": "MKV (Matroska Video)",
-            "note": "MKV metadata is complex. This is a basic check.",
-            "embedded_title": None, "embedded_creation_date": None
+            "note": "MKV metadata (title, dates) often requires external tools (mkvinfo/ffmpeg). Basic text search for title is unreliable.", # Ghi chú rõ hơn
+            "embedded_title": None,
+            "embedded_creation_date": None, # Không cố gắng lấy ngày tháng cho MKV bằng cách này
+            "extraction_notes": ["MKV date extraction not attempted due to complexity."]
         }
+        # Cải thiện tìm kiếm title một chút (vẫn không đảm bảo)
         try:
             text_data = data.decode('latin-1', errors='ignore')
-            title_match = re.search(r"TITLE(?:=|" + chr(0) + r"{1,3})([^\x00-\x1F\x7F-\xFF]{3,100})", text_data, re.IGNORECASE)
+            # Tìm tag TITLE hoặc Segment Title (thường gần đầu file hoặc trong Segment Info)
+            title_match = re.search(r"(?:TITLE|Segment title)(?:\s*:\s*|\x00{1,3})([^\x00-\x1F\x7F-\xFF]{3,150})", text_data[:20000], re.IGNORECASE) # Tìm trong 20KB đầu
             if title_match:
-                try: metadata["embedded_title"] = title_match.group(1).strip()
-                except: pass
-        except: pass
+                potential_title = title_match.group(1).strip()
+                # Lọc bỏ các chuỗi trông giống ngày tháng hoặc thông tin kỹ thuật
+                if not re.match(r"^\d{4}-\d{2}-\d{2}|\d+x\d+|Lavf", potential_title):
+                    metadata["embedded_title"] = potential_title
+                    metadata["extraction_notes"].append(f"Potential title found via text search: '{potential_title[:30]}...'")
+            else:
+                 metadata["extraction_notes"].append("No obvious title found via basic text search in MKV.")
+        except Exception as mkv_e:
+             metadata["extraction_notes"].append(f"Error during basic MKV text search: {mkv_e}")
         return metadata
-    except Exception as e: return {"error": str(e)}
+    except Exception as e:
+        return {"error": str(e), "extraction_notes": [f"General error processing MKV: {e}"]}
 
-def calculate_hash(data):
-    return hashlib.sha256(data).hexdigest()
 
+# --- Các hàm và phần còn lại của code (không thay đổi) ---
+def calculate_hash(data): return hashlib.sha256(data).hexdigest()
 def get_available_drives():
-    drives = []
-    drive_bits = win32api.GetLogicalDrives()
+    drives = []; drive_bits = win32api.GetLogicalDrives()
     for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
         if drive_bits & 1: drives.append(f"{letter}:\\")
         drive_bits >>= 1
     return drives
-
 def get_drive_total_size(drive_letter):
     try: _, totalBytes, _ = win32api.GetDiskFreeSpaceEx(drive_letter); return totalBytes
     except Exception as e: print(f"Error getting size for drive {drive_letter}: {e}"); return None
-
 def open_raw_drive(drive_path):
-    try:
-        handle = win32file.CreateFile(drive_path, win32con.GENERIC_READ,
-                                      win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE, None,
-                                      win32con.OPEN_EXISTING, 0, None)
+    try: handle = win32file.CreateFile(drive_path, win32con.GENERIC_READ, win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE, None, win32con.OPEN_EXISTING, 0, None)
     except Exception as e: raise Exception(f"Failed to open drive using CreateFile: {e} (Try running as administrator)")
-    try:
-        fd = msvcrt.open_osfhandle(handle.Detach(), os.O_RDONLY | os.O_BINARY)
-        fileD = os.fdopen(fd, 'rb')
+    try: fd = msvcrt.open_osfhandle(handle.Detach(), os.O_RDONLY | os.O_BINARY); fileD = os.fdopen(fd, 'rb')
     except Exception as e: win32api.CloseHandle(handle); raise Exception(f"Failed to convert handle to file: {e}")
     return fileD
 
+# ... (scan_drive_internal giữ nguyên như phiên bản trước) ...
 def scan_drive_internal(raw_drive_path, total_size, selected_types, progress_callback,
                         stop_event, listbox_update_callback, scan_mode="normal", sector_size=512):
     recovered_files_list_temp = []
@@ -312,6 +324,7 @@ def scan_drive_internal(raw_drive_path, total_size, selected_types, progress_cal
     if progress_callback: progress_callback(1.0, True if not stop_event.is_set() else False)
     return recovered_files_list_temp
 
+# ... (Các hàm xem trước: close_current_preview, _close_if_exists, show_metadata, preview_image, preview_text_internal, preview_external_file, preview_mkv, preview_pdf_external giữ nguyên) ...
 current_preview_window = None
 stop_scan_event = threading.Event()
 
@@ -426,6 +439,7 @@ def preview_external_file(data, metadata, file_extension, file_type_name):
 def preview_mkv(data, metadata=None): preview_external_file(data, metadata, ".mkv", "MKV")
 def preview_pdf_external(data, metadata=None): preview_external_file(data, metadata, ".pdf", "PDF")
 
+# ... (Phần cài đặt GUI: root, main_frame, tab_view, các hàm create_scan_ui, common_controls_frame với các nút lớn hơn, get_active_tab_ui_elements, update_listbox_threaded, start_scan_wrapper, on_item_double_click, context_menu, show_selected_metadata_from_active_tab, show_context_menu, recover_selected_files_from_active_tab, save_scan_report_from_active_tab, on_closing giữ nguyên như phiên bản trước đó đã sửa lỗi hiển thị nút) ...
 ctk.set_appearance_mode("System"); ctk.set_default_color_theme("blue")
 root = ctk.CTk(); root.title("Enhanced File Recovery Tool"); root.geometry("1100x850")
 recovered_files_data_store = {}; recovered_files_display_list = []
@@ -454,7 +468,6 @@ normal_scan_tab = tab_view.add("Normal Scan")
 deep_scan_tab = tab_view.add("Deep Scan (Sector by Sector)")
 
 def create_scan_ui(parent_tab, scan_mode_name):
-    # ... (Nội dung hàm create_scan_ui giữ nguyên như trước) ...
     scan_ui_frame = ctk.CTkFrame(parent_tab, fg_color="transparent")
     scan_ui_frame.pack(fill="both", expand=True, padx=5, pady=5)
     drive_frame = ctk.CTkFrame(scan_ui_frame); drive_frame.pack(pady=5, fill="x", padx=10)
@@ -517,7 +530,6 @@ def create_scan_ui(parent_tab, scan_mode_name):
 
 normal_scan_ui = create_scan_ui(normal_scan_tab, "Normal")
 deep_scan_ui = create_scan_ui(deep_scan_tab, "Deep Scan (Sector by Sector)")
-
 
 def get_active_tab_ui_elements():
     current_tab_name = tab_view.get()
@@ -615,7 +627,15 @@ def show_context_menu(event):
     if not active_ui: return
     listbox = active_ui["listbox"]
     try:
-        if listbox.curselection(): context_menu.tk_popup(event.x_root, event.y_root)
+        # Ensure an item is selected before showing the menu
+        current_selection = listbox.curselection()
+        if not current_selection: # If nothing selected, try selecting item under cursor
+            listbox.selection_clear(0, tk.END)
+            nearest_item_index = listbox.nearest(event.y)
+            listbox.selection_set(nearest_item_index)
+            # listbox.activate(nearest_item_index) # activate might not be needed
+        if listbox.curselection(): # Check selection again after potential nearest selection
+             context_menu.tk_popup(event.x_root, event.y_root)
     finally: context_menu.grab_release()
 normal_scan_ui["listbox"].bind("<Button-3>", show_context_menu)
 deep_scan_ui["listbox"].bind("<Button-3>", show_context_menu)
