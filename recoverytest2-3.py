@@ -431,11 +431,30 @@ root = ctk.CTk(); root.title("Enhanced File Recovery Tool"); root.geometry("1100
 recovered_files_data_store = {}; recovered_files_display_list = []
 output_dir = ""; current_scan_thread = None
 main_frame = ctk.CTkFrame(root); main_frame.pack(padx=10, pady=10, fill="both", expand=True)
-tab_view = ctk.CTkTabview(main_frame, height=780); tab_view.pack(padx=5, pady=5, fill="both", expand=True)
+
+# --- SỬA THỨ TỰ PACK: PACK COMMON CONTROLS TRƯỚC ---
+common_controls_frame = ctk.CTkFrame(main_frame) # Cha là main_frame
+common_controls_frame.pack(pady=10, fill="x", padx=15, side="bottom") # Đặt ở dưới cùng
+
+button_font = ("Segoe UI", 14)
+recover_button = ctk.CTkButton(common_controls_frame, text="Recover Selected Files",
+    command=lambda: recover_selected_files_from_active_tab(), height=40, width=220, font=button_font)
+recover_button.pack(side="left", padx=10, pady=10)
+report_button = ctk.CTkButton(common_controls_frame, text="Save Scan Report",
+    command=lambda: save_scan_report_from_active_tab(), height=40, width=200, font=button_font)
+report_button.pack(side="left", padx=10, pady=10)
+# --- KẾT THÚC COMMON CONTROLS ---
+
+
+# --- PACK TAB VIEW SAU KHI COMMON CONTROLS ĐÃ Ở DƯỚI ---
+tab_view = ctk.CTkTabview(main_frame) # Cha là main_frame
+tab_view.pack(padx=5, pady=5, fill="both", expand=True) # Mặc định side="top", chiếm phần còn lại
+
 normal_scan_tab = tab_view.add("Normal Scan")
 deep_scan_tab = tab_view.add("Deep Scan (Sector by Sector)")
 
 def create_scan_ui(parent_tab, scan_mode_name):
+    # ... (Nội dung hàm create_scan_ui giữ nguyên như trước) ...
     scan_ui_frame = ctk.CTkFrame(parent_tab, fg_color="transparent")
     scan_ui_frame.pack(fill="both", expand=True, padx=5, pady=5)
     drive_frame = ctk.CTkFrame(scan_ui_frame); drive_frame.pack(pady=5, fill="x", padx=10)
@@ -450,8 +469,7 @@ def create_scan_ui(parent_tab, scan_mode_name):
     selected_types_vars = {}
     file_types_canvas_container = ctk.CTkFrame(types_frame, fg_color="transparent")
     file_types_canvas_container.pack(side="left", fill="x", expand=True, padx=5)
-    # SỬA LỖI Ở ĐÂY: Bỏ tham số `bg` hoặc đảm bảo nó nhận giá trị màu hợp lệ
-    file_types_canvas = ctk.CTkCanvas(file_types_canvas_container, height=40, highlightthickness=0) # Bỏ bg=...
+    file_types_canvas = ctk.CTkCanvas(file_types_canvas_container, height=40, highlightthickness=0)
     scrollable_types_frame = ctk.CTkFrame(file_types_canvas, fg_color="transparent")
     file_types_scrollbar = ctk.CTkScrollbar(file_types_canvas_container, orientation="horizontal", command=file_types_canvas.xview)
     scrollable_types_frame.bind("<Configure>", lambda e: file_types_canvas.configure(scrollregion=file_types_canvas.bbox("all")))
@@ -499,11 +517,7 @@ def create_scan_ui(parent_tab, scan_mode_name):
 
 normal_scan_ui = create_scan_ui(normal_scan_tab, "Normal")
 deep_scan_ui = create_scan_ui(deep_scan_tab, "Deep Scan (Sector by Sector)")
-common_controls_frame = ctk.CTkFrame(main_frame); common_controls_frame.pack(pady=5, fill="x", padx=15)
-recover_button = ctk.CTkButton(common_controls_frame, text="Recover Selected Files", command=lambda: recover_selected_files_from_active_tab())
-recover_button.pack(side="left", padx=10, pady=5)
-report_button = ctk.CTkButton(common_controls_frame, text="Save Scan Report", command=lambda: save_scan_report_from_active_tab())
-report_button.pack(side="left", padx=10, pady=5)
+
 
 def get_active_tab_ui_elements():
     current_tab_name = tab_view.get()
@@ -515,8 +529,8 @@ def update_listbox_threaded(ui_elems, file_info_for_display):
     if ui_elems and ui_elems.get("listbox"):
         listbox = ui_elems["listbox"]; recovered_files_display_list.append(file_info_for_display)
         display_str = f"{file_info_for_display['display_name']} ({file_info_for_display['size']/(1024*1024):.2f} MB)"
-        if file_info_for_display.get("embedded_creation_date"): display_str += f" [C: {file_info_for_display['embedded_creation_date'][:10]}]" # Rút gọn ngày
-        elif file_info_for_display.get("embedded_modified_date"): display_str += f" [M: {file_info_for_display['embedded_modified_date'][:10]}]" # Rút gọn ngày
+        if file_info_for_display.get("embedded_creation_date"): display_str += f" [C: {file_info_for_display['embedded_creation_date'][:10]}]"
+        elif file_info_for_display.get("embedded_modified_date"): display_str += f" [M: {file_info_for_display['embedded_modified_date'][:10]}]"
         display_str += f" - Off: {file_info_for_display['offset']:x}"
         listbox.insert(tk.END, display_str); listbox.see(tk.END)
         ui_elems["progress_label"].configure(text=f"Status: Scanning... Found {len(recovered_files_display_list)} files.")
