@@ -7,7 +7,7 @@ import io
 import tempfile
 import subprocess
 import hashlib
-from datetime import datetime, timedelta # Thêm timedelta
+from datetime import datetime, timedelta
 import json
 import time
 import re
@@ -17,6 +17,7 @@ from PIL import Image, ImageTk, ExifTags
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk # Thêm import cho Treeview
+import zipfile # Thêm import này cho định dạng ZIP
 
 try:
     from PyPDF2 import PdfReader
@@ -36,7 +37,65 @@ except ImportError:
 # *** KẾT THÚC IMPORT EBMLITE ***
 
 
-# --- Các định nghĩa khác (FILE_SIGNATURES, parse_exif_date, extract_image_metadata, parse_pdf_date, extract_pdf_metadata giữ nguyên) ---
+# --- Hàm trích xuất metadata cho ZIP ---
+def extract_zip_metadata(data):
+    metadata = {
+        "embedded_title": None,
+        "embedded_creation_date": None,
+        "embedded_modified_date": None, # ZIP không có trường này rõ ràng cho file tổng thể
+        "num_files_in_archive": 0,
+        "compression_type": None,
+        "extraction_notes": []
+    }
+    try:
+        zip_file_obj = io.BytesIO(data)
+        with zipfile.ZipFile(zip_file_obj, 'r') as zf:
+            infolist = zf.infolist()
+            metadata["num_files_in_archive"] = len(infolist)
+            metadata["extraction_notes"].append(f"Found {len(infolist)} files in ZIP archive.")
+
+            if infolist:
+                first_file_info = infolist[0]
+
+                # Sử dụng tên của file đầu tiên làm tiêu đề gợi ý
+                sane_name = "".join(c if c.isalnum() or c in (' ', '_', '-', '.') else '_' for c in first_file_info.filename)
+                metadata["embedded_title"] = f"ZIP ({sane_name})"
+
+                # Ngày tạo/sửa đổi từ zipfile.ZipInfo.date_time (là tuple)
+                try:
+                    dt_tuple = first_file_info.date_time
+                    if len(dt_tuple) == 6 and all(isinstance(x, int) for x in dt_tuple) and dt_tuple[0] >= 1980:
+                        zip_datetime = datetime(*dt_tuple)
+                        metadata["embedded_creation_date"] = zip_datetime.isoformat()
+                        metadata["extraction_notes"].append(f"Date from first archived file: {zip_datetime.isoformat()}")
+                    else:
+                        metadata["extraction_notes"].append(f"Invalid date_time tuple for first archived file: {dt_tuple}")
+                except Exception as e_date:
+                    metadata["extraction_notes"].append(f"Error parsing date from first archived file: {e_date}")
+
+                compression_types = {
+                    zipfile.ZIP_STORED: "STORED (no compression)",
+                    zipfile.ZIP_DEFLATED: "DEFLATED (standard compression)",
+                    zipfile.ZIP_BZIP2: "BZIP2",
+                    zipfile.ZIP_LZMA: "LZMA"
+                }
+                metadata["compression_type"] = compression_types.get(first_file_info.compress_type, f"Unknown ({first_file_info.compress_type})")
+                metadata["extraction_notes"].append(f"Compression: {metadata['compression_type']}")
+
+            else:
+                metadata["embedded_title"] = "Empty ZIP Archive"
+                metadata["extraction_notes"].append("ZIP archive is empty.")
+
+    except zipfile.BadZipFile as bzf_e:
+        metadata["error"] = f"Bad ZIP file: {str(bzf_e)}"
+        metadata["extraction_notes"].append(f"Error: Not a valid ZIP format or corrupted. ({bzf_e})")
+    except Exception as e:
+        metadata["error"] = f"Error processing ZIP: {str(e)}"
+        metadata["extraction_notes"].append(f"General error during ZIP processing: {e}")
+    
+    return metadata
+
+# --- Định nghĩa các chữ ký tệp ---
 FILE_SIGNATURES = {
     "JPEG": {
         "headers": [b'\xff\xd8\xff\xe0', b'\xff\xd8\xff\xe1', b'\xff\xd8\xff\xe2'],
@@ -55,6 +114,12 @@ FILE_SIGNATURES = {
         "footer": None,
         "extension": ".mkv",
         "metadata_func": lambda data: extract_mkv_metadata(data) # Sẽ gọi hàm mới
+    },
+    "ZIP": { # Thêm định dạng ZIP mới
+        "headers": [b'\x50\x4B\x03\x04'], # PK\x03\x04 - Local file header signature
+        "footer": b'\x50\x4B\x05\x06',    # PK\x05\x06 - End of Central Directory record signature
+        "extension": ".zip",
+        "metadata_func": lambda data: extract_zip_metadata(data)
     }
 }
 
@@ -701,9 +766,9 @@ def update_listbox_threaded(ui_elems, file_info_for_display, total_found_count, 
     
     date_str = ""
     if file_info_for_display.get("embedded_creation_date"):
-        date_str = file_info_for_display['embedded_creation_date'][:10] # Lấy phần YYYY-MM-DD
+        date_str = file_info_for_display['embedded_creation_date'][:10] # Lấy phầnYYYY-MM-DD
     elif file_info_for_display.get("embedded_modified_date"):
-        date_str = file_info_for_display['embedded_modified_date'][:10] # Lấy phần YYYY-MM-DD
+        date_str = file_info_for_display['embedded_modified_date'][:10] # Lấy phầnYYYY-MM-DD
     
     offset_hex = f"0x{file_info_for_display['offset']:x}"
 
@@ -837,13 +902,15 @@ def on_item_double_click(event):
     file_info_display = None
     # Tìm file_info_display chính xác dựa trên dữ liệu gốc bằng display_name và offset
     # Lấy offset từ item_values và chuyển đổi lại thành số nguyên từ hex
-    # Đảm bảo item_values[4] không rỗng trước khi chuyển đổi
     offset_from_tree_str = item_values[4] if len(item_values) > 4 else None
     offset_from_tree = int(offset_from_tree_str, 16) if offset_from_tree_str and offset_from_tree_str.startswith("0x") else None
 
 
     for item in recovered_files_display_list:
-        if item.get('display_name') == item_values[0] and item.get('offset') == offset_from_tree:
+        # Cần so sánh display_name và offset để đảm bảo tìm đúng file
+        # Offset trong file_info_display là số nguyên, trong tree là string hex
+        if (item.get('display_name') == item_values[0] and
+            item.get('offset') == offset_from_tree):
             file_info_display = item
             break
 
@@ -858,6 +925,7 @@ def on_item_double_click(event):
     if file_type == "JPEG": preview_image(file_data, metadata_for_preview)
     elif file_type == "MKV": preview_mkv(file_data, metadata_for_preview)
     elif file_type == "PDF": preview_pdf_external(file_data, metadata_for_preview)
+    elif file_type == "ZIP": preview_external_file(file_data, metadata_for_preview, ".zip", "ZIP Archive") # Thêm preview cho ZIP
     else: preview_text_internal(file_data, metadata_for_preview, title=f"{file_type} Preview (Text)")
 
 # Gắn sự kiện Double-1 cho Treeview
@@ -880,7 +948,8 @@ def show_selected_metadata_from_active_tab():
         offset_from_tree = int(offset_from_tree_str, 16) if offset_from_tree_str and offset_from_tree_str.startswith("0x") else None
 
         for item in recovered_files_display_list:
-            if item.get('display_name') == item_values[0] and item.get('offset') == offset_from_tree:
+            if (item.get('display_name') == item_values[0] and
+                item.get('offset') == offset_from_tree):
                 file_info = item
                 break
         
@@ -931,7 +1000,8 @@ def recover_selected_files_from_active_tab():
         offset_from_tree = int(offset_from_tree_str, 16) if offset_from_tree_str and offset_from_tree_str.startswith("0x") else None
 
         for item in recovered_files_display_list:
-            if item.get('display_name') == item_values[0] and item.get('offset') == offset_from_tree:
+            if (item.get('display_name') == item_values[0] and
+                item.get('offset') == offset_from_tree):
                 f_info = item
                 break
         
