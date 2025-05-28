@@ -389,7 +389,7 @@ def get_available_drives():
     return drives
 def get_drive_total_size(drive_letter):
     try: _, totalBytes, _ = win32api.GetDiskFreeSpaceEx(drive_letter); return totalBytes
-    except Exception as e: print(f"Error getting size for drive {letter}: {e}"); return None
+    except Exception as e: print(f"Error getting size for drive {drive_letter}: {e}"); return None
 def open_raw_drive(drive_path):
     try: handle = win32file.CreateFile(drive_path, win32con.GENERIC_READ, win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE, None, win32con.OPEN_EXISTING, 0, None)
     except Exception as e: raise Exception(f"Failed to open drive using CreateFile: {e} (Try running as administrator)")
@@ -523,6 +523,13 @@ stop_scan_event = threading.Event()
 
 # Khai báo biến global cho thời gian bắt đầu quét
 global_scan_start_time = None
+
+# Biến global để lưu trữ trạng thái sắp xếp và bộ lọc hiện tại
+current_sort_column = None
+current_sort_reverse = False
+current_filter_name = ""
+current_filter_type = "All"
+current_filter_min_size_bytes = 0
 
 def close_current_preview():
     global current_preview_window
@@ -813,83 +820,65 @@ def get_active_tab_ui_elements():
     return None
 
 def update_listbox_threaded(ui_elems, file_info_for_display, total_found_count, files_found_by_type):
-    # Dữ liệu được thêm vào recovered_files_display_list, nhưng hiển thị trên Treeview sẽ được quản lý bởi apply_filter
-    # Cần thêm file_info_for_display vào danh sách toàn cục để bộ lọc có thể hoạt động
+    global current_filter_name, current_filter_type, current_filter_min_size_bytes, current_sort_column, current_sort_reverse
+    
+    # Thêm file vào danh sách toàn cục trước
     recovered_files_display_list.append(file_info_for_display)
 
     # Cập nhật nhãn số lượng tệp theo loại
     type_counts_str = ", ".join([f"{ftype}: {count}" for ftype, count in files_found_by_type.items() if count > 0])
     ui_elems["files_found_by_type_label"].configure(text=f"Files by type: {type_counts_str}")
 
-    # Thay vì chèn trực tiếp, chúng ta gọi apply_filter sau khi có kết quả mới
-    # Điều này đảm bảo rằng Treeview luôn hiển thị đúng trạng thái lọc/sắp xếp
-    # Tuy nhiên, để tránh cập nhật quá thường xuyên, ta sẽ trì hoãn việc gọi apply_filter
-    # hoặc chỉ gọi nó một lần sau khi quét xong, hoặc khi có một số lượng file nhất định.
-    # Để giữ nguyên cấu trúc, chúng ta sẽ gọi apply_filter mỗi khi có file mới.
-    # Lưu ý: Với số lượng file lớn, việc này có thể gây chậm.
-    root.after_idle(lambda: apply_filter(ui_elems, True)) # Gọi apply_filter trên main thread
+    # CHỈ THÊM FILE TRỰC TIẾP VÀO TREEVIEW NẾU KHÔNG CÓ BỘ LỌC HOẶC SẮP XẾP NÀO ĐANG HOẠT ĐỘNG
+    is_filtering_active = (current_filter_name != "" or 
+                           current_filter_type != "All" or 
+                           current_filter_min_size_bytes > 0)
+    is_sorting_active = (current_sort_column is not None)
+
+    if not is_filtering_active and not is_sorting_active:
+        tree = ui_elems["listbox"]
+        # Chuẩn bị dữ liệu cho các cột của Treeview
+        display_name = file_info_for_display['display_name']
+        file_type = file_info_for_display['type']
+        size_mb = f"{file_info_for_display['size']/(1024*1024):.2f} MB"
+        
+        date_str = ""
+        if file_info_for_display.get("embedded_creation_date"):
+            date_str = file_info_for_display['embedded_creation_date'][:10]
+        elif file_info_for_display.get("embedded_modified_date"):
+            date_str = file_info_for_display['embedded_modified_date'][:10]
+        
+        offset_hex = f"0x{file_info_for_display['offset']:x}"
+
+        # Chèn dữ liệu vào Treeview
+        tree.insert("", tk.END, values=(display_name, file_type, size_mb, date_str, offset_hex))
+        tree.see(tk.END) # Cuộn đến cuối
+    else:
+        # Nếu có bộ lọc/sắp xếp đang hoạt động, KHÔNG CHÈN TRỰC TIẾP để tránh làm loạn UI.
+        # Treeview sẽ được làm mới hoàn toàn bằng apply_filter sau khi scan xong hoặc khi người dùng áp dụng bộ lọc thủ công.
+        pass
 
 
 # Hàm sắp xếp Treeview
-# Dữ liệu thực sự được sắp xếp là recovered_files_display_list
-# Sau đó, Treeview được làm mới hoàn toàn
-current_sort_column = None
-current_sort_reverse = False
-
 def sort_treeview_column(tree, col, reverse):
     global current_sort_column, current_sort_reverse
     current_sort_column = col
     current_sort_reverse = reverse
 
-    # Lấy dữ liệu từ recovered_files_display_list
-    l = [(tree.set(k, col), k) for k in tree.get_children('')]
-    
-    # Chuẩn bị dữ liệu cho sắp xếp dựa trên loại cột
-    def get_sort_key(item_value, col_name):
-        if col_name == "size":
-            try:
-                # Chuyển đổi "123.45 MB" thành số để sắp xếp
-                return float(item_value.replace(" MB", ""))
-            except ValueError:
-                return -1 # Đặt các giá trị không hợp lệ ở đầu/cuối
-        elif col_name == "creation_date":
-            # Chuyển đổi "YYYY-MM-DD" thành datetime object để sắp xếp
-            try:
-                return datetime.strptime(item_value, '%Y-%m-%d')
-            except ValueError:
-                return datetime.min # Giá trị ngày nhỏ nhất nếu không parse được
-        elif col_name == "offset":
-            # Chuyển đổi "0x..." thành số nguyên
-            try:
-                return int(item_value, 16)
-            except ValueError:
-                return -1
-        return item_value.lower() # Sắp xếp chuỗi không phân biệt hoa thường
-
-    l.sort(key=lambda t: get_sort_key(t[0], col), reverse=reverse)
-
-    # Xóa tất cả các mục cũ
-    for k in tree.get_children(''):
-        tree.delete(k)
-
-    # Chèn lại dữ liệu đã sắp xếp
-    # Cần lấy thông tin đầy đủ từ recovered_files_display_list sau khi sắp xếp
-    # Cách tốt hơn: Sắp xếp recovered_files_display_list trực tiếp, sau đó áp dụng bộ lọc và hiển thị.
-    # Tạm thời, để giữ nguyên cấu trúc, chúng ta sắp xếp các item ID và chèn lại các giá trị của chúng.
-    # Nhưng điều này không sắp xếp recovered_files_display_list.
-    # Để sắp xếp recovered_files_display_list, cần sửa lại.
-    # ĐỂ ĐƠN GIẢN VÀ HIỆU QUẢ VỚI CẤU TRÚC HIỆN TẠI:
-    # Sắp xếp `recovered_files_display_list` và sau đó gọi `apply_filter` để làm mới Treeview.
-    
     # Sắp xếp recovered_files_display_list
     if col == "size":
+        # Sắp xếp dựa trên giá trị số của size
         recovered_files_display_list.sort(key=lambda x: x['size'], reverse=reverse)
     elif col == "creation_date":
-        recovered_files_display_list.sort(key=lambda x: datetime.fromisoformat(x['embedded_creation_date']) if x['embedded_creation_date'] else datetime.min, reverse=reverse)
+        # Sắp xếp dựa trên đối tượng datetime
+        # Sử dụng None hoặc một giá trị mặc định nhỏ nhất cho các mục không có ngày
+        recovered_files_display_list.sort(key=lambda x: datetime.fromisoformat(x['embedded_creation_date']) if x.get('embedded_creation_date') else datetime.min, reverse=reverse)
     elif col == "offset":
+        # Sắp xếp dựa trên giá trị số của offset
         recovered_files_display_list.sort(key=lambda x: x['offset'], reverse=reverse)
     else: # display_name, type (string sorting)
-        recovered_files_display_list.sort(key=lambda x: x[col].lower() if isinstance(x[col], str) else str(x[col]).lower(), reverse=reverse)
+        # Sử dụng một chuỗi rỗng cho các giá trị None để tránh lỗi
+        recovered_files_display_list.sort(key=lambda x: str(x.get(col, "")).lower(), reverse=reverse)
 
     # Sau khi sắp xếp list nguồn, áp dụng bộ lọc để làm mới Treeview
     apply_filter(get_active_tab_ui_elements())
@@ -898,15 +887,16 @@ def sort_treeview_column(tree, col, reverse):
     tree.heading(col, command=lambda: sort_treeview_column(tree, col, not reverse))
 
 
-def apply_filter(ui_elems, append_only_new_files=False):
+def apply_filter(ui_elems, force_refresh=False):
+    global current_filter_name, current_filter_type, current_filter_min_size_bytes
+    
     tree = ui_elems["listbox"]
-    filter_name = ui_elems["filter_name_var"].get().lower()
-    filter_type = ui_elems["filter_type_var"].get()
-    filter_min_size_str = ui_elems["filter_min_size_var"].get()
     
-    filtered_list = []
+    # Cập nhật trạng thái bộ lọc toàn cục
+    current_filter_name = ui_elems["filter_name_var"].get().lower().strip() # Thêm .strip()
+    current_filter_type = ui_elems["filter_type_var"].get()
+    filter_min_size_str = ui_elems["filter_min_size_var"].get().strip() # Thêm .strip()
     
-    # Xử lý kích thước tối thiểu
     min_size_bytes = 0
     if filter_min_size_str:
         try:
@@ -915,53 +905,40 @@ def apply_filter(ui_elems, append_only_new_files=False):
         except ValueError:
             messagebox.showwarning("Invalid Input", "Minimum size must be a number.")
             ui_elems["filter_min_size_var"].set("") # Xóa giá trị không hợp lệ
-            return
+            current_filter_min_size_bytes = 0 # Reset biến global
+            return # Dừng nếu input không hợp lệ
+    current_filter_min_size_bytes = min_size_bytes
 
-    # Clear Treeview trừ khi chỉ muốn thêm files mới (khi update trong lúc scan)
-    if not append_only_new_files:
-        tree.delete(*tree.get_children())
+    # Xóa tất cả các mục cũ khỏi Treeview trước khi điền lại
+    tree.delete(*tree.get_children())
     
-    # Duyệt qua danh sách toàn cục đã khôi phục (đã sắp xếp nếu có)
-    # Nếu append_only_new_files, chỉ cần duyệt qua các file mới chưa có trong Treeview
-    # Tuy nhiên, để đơn giản và đảm bảo đúng trạng thái lọc, chúng ta sẽ luôn duyệt lại toàn bộ
-    # recovered_files_display_list. Điều này có thể chậm nếu list quá lớn.
-    # Một cách tối ưu hơn là chỉ thêm file mới vào Treeview nếu không có filter nào đang áp dụng.
-    # Với yêu cầu "không thay đổi cấu trúc và cách hoạt động", việc duyệt lại và fill Treeview là hợp lý nhất.
-
-    items_in_tree = {tree.item(item_id, 'values')[4] for item_id in tree.get_children()} # Lấy offset đã có trong Treeview
-
-    for file_info_display in recovered_files_display_list:
+    filtered_count = 0
+    for file_info_display in recovered_files_display_list: # Duyệt qua danh sách toàn cục đã sắp xếp
         # Kiểm tra lọc theo tên/tiêu đề
         match_name = True
-        if filter_name:
-            display_name_lower = file_info_display['display_name'].lower()
-            embedded_title_lower = file_info_display['embedded_title'].lower() if file_info_display['embedded_title'] else ""
-            if filter_name not in display_name_lower and filter_name not in embedded_title_lower:
+        if current_filter_name:
+            display_name_lower = file_info_display['display_name'].lower() if file_info_display.get('display_name') else ""
+            embedded_title_lower = file_info_display['embedded_title'].lower() if file_info_display.get('embedded_title') else ""
+            if current_filter_name not in display_name_lower and current_filter_name not in embedded_title_lower:
                 match_name = False
         
         # Kiểm tra lọc theo loại
         match_type = True
-        if filter_type != "All":
-            if file_info_display['type'] != filter_type:
+        if current_filter_type != "All":
+            if file_info_display['type'] != current_filter_type:
                 match_type = False
         
         # Kiểm tra lọc theo kích thước
         match_size = True
-        if min_size_bytes > 0:
-            if file_info_display['size'] < min_size_bytes:
+        if current_filter_min_size_bytes > 0:
+            if file_info_display['size'] < current_filter_min_size_bytes:
                 match_size = False
 
-        # Nếu tất cả các bộ lọc đều khớp
+        # Nếu tất cả các bộ lọc đều khớp, thêm vào Treeview
         if match_name and match_type and match_size:
-            offset_hex = f"0x{file_info_display['offset']:x}"
-            # Chỉ thêm vào Treeview nếu chưa có (tránh trùng lặp khi append_only_new_files là True)
-            if append_only_new_files and offset_hex in items_in_tree:
-                continue # Bỏ qua file đã có trong Treeview
-            
-            # Chuẩn bị dữ liệu cho các cột của Treeview
             display_name = file_info_display['display_name']
             file_type = file_info_display['type']
-            size_mb = f"{file_info_for_display['size']/(1024*1024):.2f} MB"
+            size_mb = f"{file_info_display['size']/(1024*1024):.2f} MB"
             
             date_str = ""
             if file_info_display.get("embedded_creation_date"):
@@ -969,21 +946,22 @@ def apply_filter(ui_elems, append_only_new_files=False):
             elif file_info_display.get("embedded_modified_date"):
                 date_str = file_info_display['embedded_modified_date'][:10]
             
-            tree.insert("", tk.END, values=(display_name, file_type, size_mb, date_str, offset_hex))
-            filtered_list.append(file_info_display) # Dù không dùng trực tiếp để fill tree, vẫn có thể dùng để đếm
+            offset_hex = f"0x{file_info_display['offset']:x}"
 
-    # Đảm bảo cuộn đến cuối nếu có thêm tệp mới
-    if len(filtered_list) > 0 and append_only_new_files:
-        tree.see(tk.END)
+            tree.insert("", tk.END, values=(display_name, file_type, size_mb, date_str, offset_hex))
+            filtered_count += 1
     
-    # Cập nhật nhãn tổng số tệp hiển thị sau khi lọc
-    ui_elems["progress_label"].configure(text=ui_elems["progress_label"].cget("text").split('|')[0] + f" | Displaying: {len(filtered_list)} files")
-    # Lần đầu quét, nó sẽ hiển thị 'Scanning... Found X files'. Sau đó, khi lọc, nó sẽ hiển thị 'Displaying Y files'.
-    # Để giữ nguyên thông tin scan, chúng ta chỉ cập nhật phần "Displaying"
+    tree.see(tk.END) # Cuộn đến cuối
+    
+    # Cập nhật nhãn trạng thái hiển thị
+    total_found_str = ui_elems["progress_label"].cget("text").split('|')[0] # Lấy phần "Progress: ... Found: X"
+    ui_elems["progress_label"].configure(text=f"{total_found_str} | Displaying: {filtered_count} files")
 
 # Hàm start_scan_wrapper đã sửa global_scan_start_time
 def start_scan_wrapper(ui_elems, scan_type_str):
     global current_scan_thread, recovered_files_display_list, recovered_files_data_store, global_scan_start_time
+    global current_filter_name, current_filter_type, current_filter_min_size_bytes, current_sort_column, current_sort_reverse # Khai báo global
+    
     stop_scan_event.clear()
     
     # Xóa Treeview và danh sách dữ liệu cũ
@@ -991,17 +969,22 @@ def start_scan_wrapper(ui_elems, scan_type_str):
     recovered_files_display_list.clear()
     recovered_files_data_store.clear()
 
-    # Reset các nhãn thông tin và trạng thái
+    # Reset các nhãn thông tin
     ui_elems["files_found_by_type_label"].configure(text="")
     ui_elems["scan_button"].configure(state="disabled")
     ui_elems["stop_button"].configure(state="normal")
     ui_elems["progress_bar"].set(0)
     ui_elems["progress_label"].configure(text="Status: Starting scan...")
     
-    # Reset các bộ lọc khi bắt đầu scan mới
+    # Reset các bộ lọc và sắp xếp khi bắt đầu scan mới
     ui_elems["filter_name_var"].set("")
     ui_elems["filter_type_var"].set("All")
     ui_elems["filter_min_size_var"].set("")
+    current_filter_name = "" # Reset biến global
+    current_filter_type = "All" # Reset biến global
+    current_filter_min_size_bytes = 0 # Reset biến global
+    current_sort_column = None # Reset biến global
+    current_sort_reverse = False # Reset biến global
 
     selected_drive = ui_elems["drive_var"].get()
     if not selected_drive or selected_drive == "No drives found":
@@ -1061,6 +1044,7 @@ def start_scan_wrapper(ui_elems, scan_type_str):
         else:
             current_status_text = f"Progress: {value*100:.1f}%"
 
+        # Cập nhật tổng số tệp
         ui_elems["progress_label"].configure(text=current_status_text + f" | Found: {total_found_count}")
         
         type_counts_str = ", ".join([f"{ftype}: {count}" for ftype, count in files_found_by_type.items() if count > 0])
@@ -1072,7 +1056,7 @@ def start_scan_wrapper(ui_elems, scan_type_str):
             elif value < 0.99: final_status_message = "Scan stopped or encountered an error."
             ui_elems["progress_label"].configure(text=f"Status: {final_status_message} Found {total_found_count} files.")
             ui_elems["scan_button"].configure(state="normal"); ui_elems["stop_button"].configure(state="disabled")
-            # Sau khi quét hoàn tất, áp dụng bộ lọc cuối cùng để hiển thị tất cả các tệp theo thứ tự mặc định/sắp xếp
+            # Sau khi quét hoàn tất, áp dụng bộ lọc và sắp xếp cuối cùng để hiển thị đúng
             root.after_idle(lambda: apply_filter(ui_elems))
 
     scan_mode_arg = "deep" if "deep" in scan_type_str else "normal"
@@ -1097,11 +1081,12 @@ def on_item_double_click(event):
     
     file_info_display = None
     offset_from_tree_str = item_values[4] if len(item_values) > 4 else None
-    offset_from_tree = int(offset_from_tree_str, 16) if offset_from_tree_str and offset_from_tree_str.startswith("0x") else None
+    offset_from_tree = int(offset_from_tree_str.replace("0x", ""), 16) if offset_from_tree_str and offset_from_tree_str.startswith("0x") else None
+
 
     for item in recovered_files_display_list:
         if (item.get('display_name') == item_values[0] and
-            item.get('offset') == offset_from_tree): # So sánh trực tiếp offset
+            item.get('offset') == offset_from_tree):
             file_info_display = item
             break
 
@@ -1134,11 +1119,11 @@ def show_selected_metadata_from_active_tab():
         
         file_info = None
         offset_from_tree_str = item_values[4] if len(item_values) > 4 else None
-        offset_from_tree = int(offset_from_tree_str, 16) if offset_from_tree_str and offset_from_tree_str.startswith("0x") else None
+        offset_from_tree = int(offset_from_tree_str.replace("0x", ""), 16) if offset_from_tree_str and offset_from_tree_str.startswith("0x") else None
 
         for item in recovered_files_display_list:
             if (item.get('display_name') == item_values[0] and
-                item.get('offset') == offset_from_tree): # So sánh trực tiếp offset
+                item.get('offset') == offset_from_tree):
                 file_info = item
                 break
         
@@ -1181,11 +1166,11 @@ def recover_selected_files_from_active_tab():
         
         f_info = None
         offset_from_tree_str = item_values[4] if len(item_values) > 4 else None
-        offset_from_tree = int(offset_from_tree_str, 16) if offset_from_tree_str and offset_from_tree_str.startswith("0x") else None
+        offset_from_tree = int(offset_from_tree_str.replace("0x", ""), 16) if offset_from_tree_str and offset_from_tree_str.startswith("0x") else None
 
         for item in recovered_files_display_list:
             if (item.get('display_name') == item_values[0] and
-                item.get('offset') == offset_from_tree): # So sánh trực tiếp offset
+                item.get('offset') == offset_from_tree):
                 f_info = item
                 break
         
