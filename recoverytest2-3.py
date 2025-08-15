@@ -1,4 +1,4 @@
-# --- Imports ---
+
 import os
 import msvcrt
 import win32file, win32con, win32api
@@ -26,18 +26,18 @@ except ImportError:
     PYPDF2_AVAILABLE = False
     print("PyPDF2 library not found. PDF metadata extraction will be basic. Install with: pip install PyPDF2")
 
-# *** THÊM IMPORT EBMLITE ***
+
 try:
-    import ebmlite # Thư viện để đọc cấu trúc MKV
+    import ebmlite 
     EBMLITE_AVAILABLE = True
     print("ebmlite library found. Will use for detailed MKV metadata.")
 except ImportError:
     EBMLITE_AVAILABLE = False
     print("ebmlite library not found. MKV metadata extraction will be basic. Install with: pip install ebmlite")
-# *** KẾT THÚC IMPORT EBMLITE ***
 
 
-# --- Hàm trích xuất metadata cho ZIP ---
+
+
 def extract_zip_metadata(data):
     metadata = {
         "embedded_title": None,
@@ -57,11 +57,11 @@ def extract_zip_metadata(data):
             if infolist:
                 first_file_info = infolist[0]
 
-                # Sử dụng tên của file đầu tiên làm tiêu đề gợi ý
+                
                 sane_name = "".join(c if c.isalnum() or c in (' ', '_', '-', '.') else '_' for c in first_file_info.filename)
                 metadata["embedded_title"] = f"ZIP ({sane_name})"
 
-                # Ngày tạo/sửa đổi từ zipfile.ZipInfo.date_time (là tuple)
+                
                 try:
                     dt_tuple = first_file_info.date_time
                     if len(dt_tuple) == 6 and all(isinstance(x, int) for x in dt_tuple) and dt_tuple[0] >= 1980:
@@ -95,7 +95,7 @@ def extract_zip_metadata(data):
     
     return metadata
 
-# --- Định nghĩa các chữ ký tệp ---
+
 FILE_SIGNATURES = {
     "JPEG": {
         "headers": [b'\xff\xd8\xff\xe0', b'\xff\xd8\xff\xe1', b'\xff\xd8\xff\xe2'],
@@ -110,14 +110,14 @@ FILE_SIGNATURES = {
         "metadata_func": lambda data: extract_pdf_metadata(data)
     },
     "MKV": {
-        "headers": [b'\x1A\x45\xDF\xA3'], # EBML Header
+        "headers": [b'\x1A\x45\xDF\xA3'], 
         "footer": None,
         "extension": ".mkv",
-        "metadata_func": lambda data: extract_mkv_metadata(data) # Sẽ gọi hàm mới
+        "metadata_func": lambda data: extract_mkv_metadata(data) 
     },
-    "ZIP": { # Thêm định dạng ZIP mới
-        "headers": [b'\x50\x4B\x03\x04'], # PK\x03\x04 - Local file header signature
-        "footer": b'\x50\x4B\x05\x06',    # PK\x05\x06 - End of Central Directory record signature
+    "ZIP": { 
+        "headers": [b'\x50\x4B\x03\x04'], 
+        "footer": b'\x50\x4B\x05\x06',    
         "extension": ".zip",
         "metadata_func": lambda data: extract_zip_metadata(data)
     }
@@ -173,16 +173,16 @@ def extract_image_metadata(data):
                     if metadata["embedded_modified_date"]: metadata["extraction_notes"].append("Used DateTimeDigitized for modified date (DateTime missing).")
                 if img_desc: metadata["embedded_title"] = img_desc; metadata["extraction_notes"].append("Used ImageDescription for title.")
                 elif xp_title_bytes:
-                    try: # Sửa lỗi Try statement 1
+                    try: 
                         decoded_xp_title = xp_title_bytes.decode('utf-16-le', errors='replace').strip()
                         print(f"      Decoded XPTitle (UTF-16LE): '{decoded_xp_title}'")
                     except Exception as e1:
                         print(f"      UTF-16LE decode failed: {e1}")
-                        try: # Sửa lỗi Try statement 2
+                        try: 
                             decoded_xp_title = xp_title_bytes.decode('latin-1', errors='replace').strip()
-                            # Sửa lỗi "(`" was not closed. Đóng f-string trước khi đóng print()
+                            
                             print(f"      Decoded XPTitle (Latin-1): '{decoded_xp_title}'")
-                        except Exception as e2: # Sửa lỗi Try statement 2
+                        except Exception as e2: 
                             print(f"      Latin-1 decode failed: {e2}")
                             decoded_xp_title = str(xp_title_bytes)
                             print(f"      XPTitle fallback to string: '{decoded_xp_title}'")
@@ -198,7 +198,7 @@ def extract_image_metadata(data):
         return metadata
     except Exception as e: print(f"--- Error Opening/Processing JPEG: {e} ---"); return {"error": str(e), "notes": ["Could not open image or read basic properties."]}
 
-def parse_pdf_date(date_str): # Giữ nguyên
+def parse_pdf_date(date_str): 
     if not date_str or not isinstance(date_str, str): return None
     date_str = date_str.strip();
     if date_str.startswith("D:"): date_str = date_str[2:]
@@ -213,7 +213,7 @@ def parse_pdf_date(date_str): # Giữ nguyên
         return dt.isoformat()
     except ValueError: return str(date_str)
 
-def extract_pdf_metadata(data): # Giữ nguyên
+def extract_pdf_metadata(data): 
     metadata = {"embedded_title": None, "embedded_author": None, "embedded_creation_date": None,
                 "embedded_modified_date": None, "pdf_version": None, "num_pages": None, "extraction_notes": []}
     if not PYPDF2_AVAILABLE:
@@ -245,20 +245,20 @@ def extract_pdf_metadata(data): # Giữ nguyên
         metadata["error"] = f"PyPDF2 processing error: {str(e)}"; metadata["extraction_notes"].append(f"PyPDF2 error: {e}")
         return metadata
 
-# --- HÀM MỚI CHO MKV SỬ DỤNG EBMLITE ---
+
 def extract_mkv_metadata(data):
     metadata = {
         "size_bytes": len(data),
         "file_type_suggestion": "MKV (Matroska Video)",
         "embedded_title": None,
-        "embedded_creation_date": None, # Hoặc coi là Muxing Date
+        "embedded_creation_date": None,
         "extraction_notes": []
     }
 
     if not EBMLITE_AVAILABLE:
         metadata["error"] = "ebmlite library not installed."
         metadata["extraction_notes"].append("Cannot perform detailed MKV parsing.")
-        # Có thể giữ lại phần tìm kiếm text cũ làm fallback nếu muốn
+        
         try:
             text_data = data.decode('latin-1', errors='ignore')
             title_match = re.search(r"(?:TITLE|Segment title)(?:\s*:\s*|\x00{1,3})([^\x00-\x1F\x7F-\xFF]{3,150})", text_data[:20000], re.IGNORECASE)
@@ -267,50 +267,47 @@ def extract_mkv_metadata(data):
                 if not re.match(r"^\d{4}-\d{2}-\d{2}|\d+x\d+|Lavf", potential_title):
                     metadata["embedded_title"] = potential_title
                     metadata["extraction_notes"].append(f"(Fallback) Potential title found via text search: '{potential_title[:30]}...'")
-        except: pass # Bỏ qua lỗi trong fallback
+        except: pass 
         return metadata
 
-    # Sử dụng ebmlite
+    
     stream = io.BytesIO(data)
     try:
         print("--- Parsing MKV with ebmlite ---")
         metadata["extraction_notes"].append("Attempting MKV parse with ebmlite.")
-        # ebmlite cần biết schema của Matroska để hiểu các ID
-        # Tải schema mặc định đi kèm ebmlite (cần đảm bảo ebmlite cài đúng cách)
+        
         schema_path = os.path.join(os.path.dirname(ebmlite.__file__), 'schemata', 'matroska.xml')
         if not os.path.exists(schema_path):
             print(f"    Matroska schema not found at {schema_path}. ebmlite parsing might be limited.")
             metadata["extraction_notes"].append("Matroska schema for ebmlite not found. Parsing might fail.")
-            # Nếu không có schema, bạn vẫn có thể thử load nhưng sẽ không biết tên tag
-            # doc = ebmlite.Document.load(stream)
+            
             raise FileNotFoundError("Matroska schema for ebmlite not found.") # Hoặc dừng lại ở đây
         else:
             print(f"    Loading Matroska schema from: {schema_path}")
-            schema = ebmlite.loadSchema(schema_path) #'matroska.xml')
-            doc = schema.load(stream) # Load với schema
+            schema = ebmlite.loadSchema(schema_path) 
+            doc = schema.load(stream) 
 
-        # Tìm các elements quan trọng
-        # Lưu ý: Cấu trúc tài liệu ebmlite có thể hơi khác nhau
+        
         segment = None
         for element in doc:
-            # Element cấp cao nhất thường là EBML header và Segment
-            if element.name == 'Segment': # Tìm theo tên nếu dùng schema
+            
+            if element.name == 'Segment':
                 segment = element
                 print(f"    Found Segment element.")
                 break
-            elif element.id == 0x18538067: # Tìm theo ID nếu không dùng schema (dự phòng)
+            elif element.id == 0x18538067: 
                 segment = element
                 print(f"    Found Segment element (by ID).")
                 break
 
         if segment:
             info_element = None
-            for element in segment: # Duyệt các element con của Segment
-                if element.name == 'Info': # Tìm Info element
+            for element in segment: 
+                if element.name == 'Info': 
                     info_element = element
                     print(f"    Found Info element.")
                     break
-                elif element.id == 0x1549A966: # ID của Info (dự phòng)
+                elif element.id == 0x1549A966:
                     info_element = element
                     print(f"    Found Info element (by ID).")
                     break
@@ -318,11 +315,11 @@ def extract_mkv_metadata(data):
             if info_element:
                 title_val = None
                 date_utc_val = None
-                for element in info_element: # Duyệt các element con của Info
-                    if element.name == 'Title': # ID 0x7BA9
+                for element in info_element:
+                    if element.name == 'Title':
                         title_val = element.value
                         print(f"    Found Title element: {title_val} (Type: {type(title_val).__name__})")
-                    elif element.name == 'DateUTC': # ID 0x4461
+                    elif element.name == 'DateUTC':
                         date_utc_val = element.value
                         print(f"    Found DateUTC element: {date_utc_val} (Type: {type(date_utc_val).__name__})")
 
@@ -334,13 +331,13 @@ def extract_mkv_metadata(data):
                     else: metadata["embedded_title"] = str(title_val).strip()
                     metadata["extraction_notes"].append(f"Extracted Title: '{metadata['embedded_title'][:50]}...'")
 
-                # Xử lý DateUTC
-                if date_utc_val is not None: # DateUTC có thể là 0
+                
+                if date_utc_val is not None:
                     if isinstance(date_utc_val, int):
                         try:
-                            # DateUTC là nanoseconds kể từ 2001-01-01 00:00:00 UTC
+                            
                             epoch_2001 = datetime(2001, 1, 1, 0, 0, 0)
-                            # Chuyển nanoseconds sang microseconds cho timedelta
+                            
                             mkv_datetime = epoch_2001 + timedelta(microseconds=date_utc_val // 1000)
                             metadata["embedded_creation_date"] = mkv_datetime.isoformat() + "Z" # Thêm Z cho UTC
                             metadata["extraction_notes"].append(f"Extracted DateUTC: {metadata['embedded_creation_date']}")
@@ -351,10 +348,10 @@ def extract_mkv_metadata(data):
                         print(f"    DateUTC value is not an integer ({type(date_utc_val).__name__}).")
                         metadata["extraction_notes"].append("DateUTC value has unexpected type.")
 
-            else: # Sửa lỗi Statements must be separated by newlines or semicolons
+            else: 
                 print("    Info element not found within Segment.")
                 metadata["extraction_notes"].append("Info element not found.")
-        else: # Sửa lỗi Statements must be separated by newlines or semicolons
+        else: 
             print("    Segment element not found in MKV data.")
             metadata["extraction_notes"].append("Segment element not found.")
 
@@ -362,7 +359,7 @@ def extract_mkv_metadata(data):
         metadata["error"] = f"ebmlite DecodeError: {e}"
         metadata["extraction_notes"].append(f"ebmlite decode error (file might be corrupt/incomplete): {e}")
         print(f"--- ebmlite DecodeError: {e} ---")
-    except FileNotFoundError as e: # Bắt lỗi không tìm thấy schema
+    except FileNotFoundError as e: 
         metadata["error"] = f"ebmlite schema error: {e}"
         metadata["extraction_notes"].append(f"ebmlite schema error: {e}")
         print(f"--- ebmlite Schema Error: {e} ---")
@@ -371,15 +368,11 @@ def extract_mkv_metadata(data):
         metadata["extraction_notes"].append(f"General ebmlite error: {e}")
         print(f"--- General ebmlite Error: {e} ---")
     finally:
-        # Đảm bảo stream được đóng nếu cần (BytesIO thì không cần thiết lắm)
-        # if stream: stream.close()
+        
         print("--- Finished MKV Metadata Extraction ---")
 
     return metadata
-# --- KẾT THÚC HÀM MKV MỚI ---
 
-
-# ... (Phần còn lại của mã từ calculate_hash đến root.mainloop() giữ nguyên) ...
 def calculate_hash(data): return hashlib.sha256(data).hexdigest()
 def get_available_drives():
     drives = []; drive_bits = win32api.GetLogicalDrives()
@@ -400,13 +393,13 @@ def open_raw_drive(drive_path):
 def scan_drive_internal(raw_drive_path, total_size, selected_types, progress_callback,
                         stop_event, listbox_update_callback, scan_mode="normal", sector_size=512):
     recovered_files_list_temp = []
-    # Thêm biến đếm số lượng tệp tìm thấy cho từng loại
+   
     files_found_by_type = {ftype: 0 for ftype in selected_types} # Dictionary để lưu số lượng tệp theo loại
 
     try: fileD = open_raw_drive(raw_drive_path)
     except Exception as e:
         messagebox.showerror("Error", f"Failed to open drive: {e}")
-        # Truyền thêm total_found_count và files_found_by_type (trống) khi có lỗi
+        
         if progress_callback: progress_callback(0, True, 0, {})
         return recovered_files_list_temp
 
@@ -417,8 +410,8 @@ def scan_drive_internal(raw_drive_path, total_size, selected_types, progress_cal
     overlap = max_header_size - 1 if max_header_size > 0 else 0
     offset = 0
     previous_chunk = b""
-    # scan_start_time đã được xử lý ở start_scan_wrapper (global_scan_start_time)
-    files_found_count = 0 # Tổng số tệp tìm thấy
+    
+    files_found_count = 0 
 
     while not stop_event.is_set():
         try: chunk = fileD.read(block_size)
@@ -500,31 +493,31 @@ def scan_drive_internal(raw_drive_path, total_size, selected_types, progress_cal
                         recovered_files_list_temp.append(file_information_for_list)
                         
                         files_found_count +=1
-                        # Cập nhật số lượng tệp tìm thấy theo loại
+                        
                         files_found_by_type[ftype_key] = files_found_by_type.get(ftype_key, 0) + 1
 
                         if listbox_update_callback: listbox_update_callback(file_information_for_list, files_found_count, files_found_by_type)
         previous_chunk = chunk[-overlap:] if overlap > 0 and len(chunk) > overlap else chunk if overlap > 0 else b""
         offset += len(chunk) - (len(previous_chunk) if previous_chunk is chunk and len(chunk) > overlap else 0)
-        # Cập nhật progress_callback với tổng số tệp và số lượng theo loại
+        
         if progress_callback and total_size: progress_callback(offset / total_size if total_size else 0, False, files_found_count, files_found_by_type)
         if scan_mode == "deep" and files_found_count > 0 and files_found_count % 10 == 0: time.sleep(0.01)
     
-    # scan_end_time đã được xử lý ở start_scan_wrapper (thông qua progress_callback cuối cùng)
+   
     print(f"Scan ({scan_mode}) completed. Found {files_found_count} potential files.")
     
     if fileD: fileD.close()
-    # Gửi tín hiệu hoàn thành cuối cùng với tất cả thông tin
+    
     if progress_callback: progress_callback(1.0, True if not stop_event.is_set() else False, files_found_count, files_found_by_type)
     return recovered_files_list_temp
 
 current_preview_window = None
 stop_scan_event = threading.Event()
 
-# Khai báo biến global cho thời gian bắt đầu quét
+
 global_scan_start_time = None
 
-# Biến global để lưu trữ trạng thái sắp xếp và bộ lọc hiện tại
+
 current_sort_column = None
 current_sort_reverse = False
 current_filter_name = ""
@@ -668,7 +661,7 @@ def create_scan_ui(parent_tab, scan_mode_name):
     scan_ui_frame = ctk.CTkFrame(parent_tab, fg_color="transparent")
     scan_ui_frame.pack(fill="both", expand=True, padx=5, pady=5)
     
-    # === Khung lựa chọn ổ đĩa và loại tệp ===
+    
     config_frame = ctk.CTkFrame(scan_ui_frame)
     config_frame.pack(pady=5, fill="x", padx=10)
 
@@ -699,42 +692,42 @@ def create_scan_ui(parent_tab, scan_mode_name):
     
     config_frame.columnconfigure(1, weight=1) # types_frame sẽ mở rộng
 
-    # === Khung Lọc Kết quả ===
+    
     filter_frame = ctk.CTkFrame(scan_ui_frame); filter_frame.pack(pady=5, fill="x", padx=10)
     
     ctk.CTkLabel(filter_frame, text="Filter by:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
     
-    # Bộ lọc Tên/Tiêu đề
+    
     filter_name_label = ctk.CTkLabel(filter_frame, text="Name/Title:")
     filter_name_label.grid(row=0, column=1, padx=2, pady=5, sticky="w")
     filter_name_var = ctk.StringVar()
     filter_name_entry = ctk.CTkEntry(filter_frame, textvariable=filter_name_var, width=150)
     filter_name_entry.grid(row=0, column=2, padx=2, pady=5, sticky="ew")
 
-    # Bộ lọc Loại tệp
+    
     filter_type_label = ctk.CTkLabel(filter_frame, text="Type:")
     filter_type_label.grid(row=0, column=3, padx=2, pady=5, sticky="w")
-    # Lấy tất cả các loại tệp + "All"
+    
     filter_type_options = ["All"] + list(FILE_SIGNATURES.keys())
     filter_type_var = ctk.StringVar(value="All")
     filter_type_combobox = ctk.CTkComboBox(filter_frame, values=filter_type_options, variable=filter_type_var, width=100)
     filter_type_combobox.grid(row=0, column=4, padx=2, pady=5, sticky="ew")
 
-    # Bộ lọc Kích thước
+    
     filter_size_label = ctk.CTkLabel(filter_frame, text="Min Size (MB):")
     filter_size_label.grid(row=0, column=5, padx=2, pady=5, sticky="w")
     filter_min_size_var = ctk.StringVar(value="") # Cho phép trống
     filter_min_size_entry = ctk.CTkEntry(filter_frame, textvariable=filter_min_size_var, width=70)
     filter_min_size_entry.grid(row=0, column=6, padx=2, pady=5, sticky="ew")
     
-    filter_frame.columnconfigure(2, weight=1) # Cột cho tên mở rộng
-    filter_frame.columnconfigure(4, weight=1) # Cột cho loại mở rộng
-    filter_frame.columnconfigure(6, weight=1) # Cột cho kích thước mở rộng
+    filter_frame.columnconfigure(2, weight=1) 
+    filter_frame.columnconfigure(4, weight=1) 
+    filter_frame.columnconfigure(6, weight=1) 
     
     filter_button = ctk.CTkButton(filter_frame, text="Apply Filter", command=lambda: apply_filter(ui_elements), width=100)
     filter_button.grid(row=0, column=7, padx=10, pady=5, sticky="e")
     
-    # === Các điều khiển quét ===
+   
     output_frame = ctk.CTkFrame(scan_ui_frame); output_frame.pack(pady=5, fill="x", padx=10)
     def select_output_directory_tab():
         global output_dir
@@ -758,28 +751,28 @@ def create_scan_ui(parent_tab, scan_mode_name):
     progress_label = ctk.CTkLabel(scan_controls_frame, text="Status: Idle", wraplength=700, justify="left")
     progress_label.grid(row=2, column=0, columnspan=3, padx=5, pady=2, sticky="w"); scan_controls_frame.columnconfigure(1, weight=1)
 
-    # Thêm Treeview thay cho Listbox
+    
     listbox_frame = ctk.CTkFrame(scan_ui_frame); listbox_frame.pack(pady=5, fill="both", expand=True, padx=10)
     
-    # Định nghĩa các cột cho Treeview
+    
     columns = ("display_name", "type", "size", "creation_date", "offset")
     tree = ttk.Treeview(listbox_frame, columns=columns, show="headings", selectmode="extended")
     
-    # Định dạng các tiêu đề cột
+    
     tree.heading("display_name", text="Tên tệp", anchor=tk.W, command=lambda: sort_treeview_column(tree, "display_name", False)) # Thêm sắp xếp
     tree.heading("type", text="Loại", anchor=tk.W, command=lambda: sort_treeview_column(tree, "type", False)) # Thêm sắp xếp
     tree.heading("size", text="Kích thước", anchor=tk.E, command=lambda: sort_treeview_column(tree, "size", False)) # Thêm sắp xếp, căn phải
     tree.heading("creation_date", text="Ngày tạo", anchor=tk.W, command=lambda: sort_treeview_column(tree, "creation_date", False)) # Thêm sắp xếp
     tree.heading("offset", text="Offset", anchor=tk.W, command=lambda: sort_treeview_column(tree, "offset", False)) # Thêm sắp xếp
 
-    # Định dạng chiều rộng cột (tùy chỉnh cho phù hợp)
+   
     tree.column("display_name", width=250, stretch=tk.YES)
     tree.column("type", width=80, stretch=tk.NO)
     tree.column("size", width=100, stretch=tk.NO, anchor=tk.E) # Căn phải cho kích thước
     tree.column("creation_date", width=120, stretch=tk.NO)
     tree.column("offset", width=120, stretch=tk.NO)
 
-    # Thêm thanh cuộn cho Treeview
+    
     tree_scrollbar_y = ctk.CTkScrollbar(listbox_frame, command=tree.yview)
     tree_scrollbar_x = ctk.CTkScrollbar(listbox_frame, command=tree.xview, orientation="horizontal")
     tree.configure(yscrollcommand=tree_scrollbar_y.set, xscrollcommand=tree_scrollbar_x.set)
@@ -788,7 +781,7 @@ def create_scan_ui(parent_tab, scan_mode_name):
     tree_scrollbar_x.pack(side="bottom", fill="x")
     tree.pack(padx=0, pady=0, fill="both", expand=True)
 
-    # Cập nhật ui_elements để trỏ đến Treeview thay vì Listbox
+    
     ui_elements = {
         "drive_var": drive_var, 
         "selected_types_vars": selected_types_vars,
@@ -797,9 +790,9 @@ def create_scan_ui(parent_tab, scan_mode_name):
         "stop_button": stop_button,
         "progress_bar": progress_bar, 
         "progress_label": progress_label, 
-        "listbox": tree, # Thay đổi ở đây
+        "listbox": tree,
         "files_found_by_type_label": ctk.CTkLabel(scan_controls_frame, text="", wraplength=700, justify="left"), # Thêm label mới
-        # Thêm các biến liên quan đến bộ lọc vào ui_elements
+       
         "filter_name_var": filter_name_var,
         "filter_type_var": filter_type_var,
         "filter_min_size_var": filter_min_size_var
@@ -822,14 +815,14 @@ def get_active_tab_ui_elements():
 def update_listbox_threaded(ui_elems, file_info_for_display, total_found_count, files_found_by_type):
     global current_filter_name, current_filter_type, current_filter_min_size_bytes, current_sort_column, current_sort_reverse
     
-    # Thêm file vào danh sách toàn cục trước
+    
     recovered_files_display_list.append(file_info_for_display)
 
-    # Cập nhật nhãn số lượng tệp theo loại
+    
     type_counts_str = ", ".join([f"{ftype}: {count}" for ftype, count in files_found_by_type.items() if count > 0])
     ui_elems["files_found_by_type_label"].configure(text=f"Files by type: {type_counts_str}")
 
-    # CHỈ THÊM FILE TRỰC TIẾP VÀO TREEVIEW NẾU KHÔNG CÓ BỘ LỌC HOẶC SẮP XẾP NÀO ĐANG HOẠT ĐỘNG
+    
     is_filtering_active = (current_filter_name != "" or 
                            current_filter_type != "All" or 
                            current_filter_min_size_bytes > 0)
@@ -837,7 +830,7 @@ def update_listbox_threaded(ui_elems, file_info_for_display, total_found_count, 
 
     if not is_filtering_active and not is_sorting_active:
         tree = ui_elems["listbox"]
-        # Chuẩn bị dữ liệu cho các cột của Treeview
+        
         display_name = file_info_for_display['display_name']
         file_type = file_info_for_display['type']
         size_mb = f"{file_info_for_display['size']/(1024*1024):.2f} MB"
@@ -850,12 +843,11 @@ def update_listbox_threaded(ui_elems, file_info_for_display, total_found_count, 
         
         offset_hex = f"0x{file_info_for_display['offset']:x}"
 
-        # Chèn dữ liệu vào Treeview
+        
         tree.insert("", tk.END, values=(display_name, file_type, size_mb, date_str, offset_hex))
-        tree.see(tk.END) # Cuộn đến cuối
+        tree.see(tk.END) 
     else:
-        # Nếu có bộ lọc/sắp xếp đang hoạt động, KHÔNG CHÈN TRỰC TIẾP để tránh làm loạn UI.
-        # Treeview sẽ được làm mới hoàn toàn bằng apply_filter sau khi scan xong hoặc khi người dùng áp dụng bộ lọc thủ công.
+        
         pass
 
 
@@ -865,25 +857,23 @@ def sort_treeview_column(tree, col, reverse):
     current_sort_column = col
     current_sort_reverse = reverse
 
-    # Sắp xếp recovered_files_display_list
+    
     if col == "size":
-        # Sắp xếp dựa trên giá trị số của size
+        
         recovered_files_display_list.sort(key=lambda x: x['size'], reverse=reverse)
     elif col == "creation_date":
-        # Sắp xếp dựa trên đối tượng datetime
-        # Sử dụng None hoặc một giá trị mặc định nhỏ nhất cho các mục không có ngày
+        
         recovered_files_display_list.sort(key=lambda x: datetime.fromisoformat(x['embedded_creation_date']) if x.get('embedded_creation_date') else datetime.min, reverse=reverse)
     elif col == "offset":
-        # Sắp xếp dựa trên giá trị số của offset
+        
         recovered_files_display_list.sort(key=lambda x: x['offset'], reverse=reverse)
-    else: # display_name, type (string sorting)
-        # Sử dụng một chuỗi rỗng cho các giá trị None để tránh lỗi
+    else: 
         recovered_files_display_list.sort(key=lambda x: str(x.get(col, "")).lower(), reverse=reverse)
 
-    # Sau khi sắp xếp list nguồn, áp dụng bộ lọc để làm mới Treeview
+    
     apply_filter(get_active_tab_ui_elements())
 
-    # Đảo ngược cờ sắp xếp cho lần nhấp tiếp theo
+    
     tree.heading(col, command=lambda: sort_treeview_column(tree, col, not reverse))
 
 
@@ -892,7 +882,7 @@ def apply_filter(ui_elems, force_refresh=False):
     
     tree = ui_elems["listbox"]
     
-    # Cập nhật trạng thái bộ lọc toàn cục
+    
     current_filter_name = ui_elems["filter_name_var"].get().lower().strip() # Thêm .strip()
     current_filter_type = ui_elems["filter_type_var"].get()
     filter_min_size_str = ui_elems["filter_min_size_var"].get().strip() # Thêm .strip()
@@ -904,17 +894,17 @@ def apply_filter(ui_elems, force_refresh=False):
             min_size_bytes = min_size_mb * 1024 * 1024
         except ValueError:
             messagebox.showwarning("Invalid Input", "Minimum size must be a number.")
-            ui_elems["filter_min_size_var"].set("") # Xóa giá trị không hợp lệ
-            current_filter_min_size_bytes = 0 # Reset biến global
-            return # Dừng nếu input không hợp lệ
+            ui_elems["filter_min_size_var"].set("") 
+            current_filter_min_size_bytes = 0 
+            return 
     current_filter_min_size_bytes = min_size_bytes
 
-    # Xóa tất cả các mục cũ khỏi Treeview trước khi điền lại
+    
     tree.delete(*tree.get_children())
     
     filtered_count = 0
     for file_info_display in recovered_files_display_list: # Duyệt qua danh sách toàn cục đã sắp xếp
-        # Kiểm tra lọc theo tên/tiêu đề
+        
         match_name = True
         if current_filter_name:
             display_name_lower = file_info_display['display_name'].lower() if file_info_display.get('display_name') else ""
@@ -922,19 +912,19 @@ def apply_filter(ui_elems, force_refresh=False):
             if current_filter_name not in display_name_lower and current_filter_name not in embedded_title_lower:
                 match_name = False
         
-        # Kiểm tra lọc theo loại
+
         match_type = True
         if current_filter_type != "All":
             if file_info_display['type'] != current_filter_type:
                 match_type = False
         
-        # Kiểm tra lọc theo kích thước
+        
         match_size = True
         if current_filter_min_size_bytes > 0:
             if file_info_display['size'] < current_filter_min_size_bytes:
                 match_size = False
 
-        # Nếu tất cả các bộ lọc đều khớp, thêm vào Treeview
+        
         if match_name and match_type and match_size:
             display_name = file_info_display['display_name']
             file_type = file_info_display['type']
@@ -951,40 +941,40 @@ def apply_filter(ui_elems, force_refresh=False):
             tree.insert("", tk.END, values=(display_name, file_type, size_mb, date_str, offset_hex))
             filtered_count += 1
     
-    tree.see(tk.END) # Cuộn đến cuối
+    tree.see(tk.END) 
     
-    # Cập nhật nhãn trạng thái hiển thị
+    
     total_found_str = ui_elems["progress_label"].cget("text").split('|')[0] # Lấy phần "Progress: ... Found: X"
     ui_elems["progress_label"].configure(text=f"{total_found_str} | Displaying: {filtered_count} files")
 
-# Hàm start_scan_wrapper đã sửa global_scan_start_time
+
 def start_scan_wrapper(ui_elems, scan_type_str):
     global current_scan_thread, recovered_files_display_list, recovered_files_data_store, global_scan_start_time
     global current_filter_name, current_filter_type, current_filter_min_size_bytes, current_sort_column, current_sort_reverse # Khai báo global
     
     stop_scan_event.clear()
     
-    # Xóa Treeview và danh sách dữ liệu cũ
+    
     ui_elems["listbox"].delete(*ui_elems["listbox"].get_children()) 
     recovered_files_display_list.clear()
     recovered_files_data_store.clear()
 
-    # Reset các nhãn thông tin
+   
     ui_elems["files_found_by_type_label"].configure(text="")
     ui_elems["scan_button"].configure(state="disabled")
     ui_elems["stop_button"].configure(state="normal")
     ui_elems["progress_bar"].set(0)
     ui_elems["progress_label"].configure(text="Status: Starting scan...")
     
-    # Reset các bộ lọc và sắp xếp khi bắt đầu scan mới
+    
     ui_elems["filter_name_var"].set("")
     ui_elems["filter_type_var"].set("All")
     ui_elems["filter_min_size_var"].set("")
-    current_filter_name = "" # Reset biến global
-    current_filter_type = "All" # Reset biến global
-    current_filter_min_size_bytes = 0 # Reset biến global
-    current_sort_column = None # Reset biến global
-    current_sort_reverse = False # Reset biến global
+    current_filter_name = "" 
+    current_filter_type = "All" 
+    current_filter_min_size_bytes = 0 
+    current_sort_column = None 
+    current_sort_reverse = False 
 
     selected_drive = ui_elems["drive_var"].get()
     if not selected_drive or selected_drive == "No drives found":
@@ -1044,7 +1034,7 @@ def start_scan_wrapper(ui_elems, scan_type_str):
         else:
             current_status_text = f"Progress: {value*100:.1f}%"
 
-        # Cập nhật tổng số tệp
+        
         ui_elems["progress_label"].configure(text=current_status_text + f" | Found: {total_found_count}")
         
         type_counts_str = ", ".join([f"{ftype}: {count}" for ftype, count in files_found_by_type.items() if count > 0])
@@ -1056,7 +1046,7 @@ def start_scan_wrapper(ui_elems, scan_type_str):
             elif value < 0.99: final_status_message = "Scan stopped or encountered an error."
             ui_elems["progress_label"].configure(text=f"Status: {final_status_message} Found {total_found_count} files.")
             ui_elems["scan_button"].configure(state="normal"); ui_elems["stop_button"].configure(state="disabled")
-            # Sau khi quét hoàn tất, áp dụng bộ lọc và sắp xếp cuối cùng để hiển thị đúng
+            
             root.after_idle(lambda: apply_filter(ui_elems))
 
     scan_mode_arg = "deep" if "deep" in scan_type_str else "normal"
